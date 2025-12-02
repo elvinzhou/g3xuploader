@@ -1,0 +1,50 @@
+# G3X Database Updater Service
+# /lib/systemd/system/g3x-db-updater@.service
+#
+# This is a template service that gets instantiated with the device name
+# when an SD card is inserted.
+#
+# Installation:
+#   sudo cp g3x-db-updater@.service /lib/systemd/system/
+#   sudo systemctl daemon-reload
+
+[Unit]
+Description=G3X Database Updater for %i
+Documentation=https://github.com/yourusername/g3x-database-updater
+BindsTo=dev-%i.device
+After=dev-%i.device
+# Don't start if the flight processor is already handling this card
+Conflicts=g3x-processor@%i.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=no
+
+# Create mount point
+ExecStartPre=/bin/mkdir -p /mnt/g3x_db_update
+
+# Mount the device read-write
+ExecStartPre=/bin/mount -o rw,sync /dev/%i /mnt/g3x_db_update
+
+# Run the database updater
+# Using auto-update with the mounted path
+ExecStart=/usr/local/bin/g3x-db-updater write -y -d /mnt/g3x_db_update /var/lib/g3x_db_updater/pending/*.taw
+
+# Sync and unmount
+ExecStopPost=/bin/sync
+ExecStopPost=/bin/umount /mnt/g3x_db_update
+ExecStopPost=-/bin/rmdir /mnt/g3x_db_update
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=g3x-db-updater
+
+# Safety: timeout after 30 minutes (database updates can be large)
+TimeoutStartSec=1800
+
+# Run as root for mount access
+User=root
+
+[Install]
+WantedBy=multi-user.target
