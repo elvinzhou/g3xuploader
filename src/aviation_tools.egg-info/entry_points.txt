@@ -1,0 +1,2 @@
+[console_scripts]
+aviation-tools = aviation_tools.cli:main

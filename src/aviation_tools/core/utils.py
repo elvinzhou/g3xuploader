@@ -1,0 +1,215 @@
+"""
+Common utilities used across aviation tools modules.
+"""
+
+import hashlib
+import logging
+import sys
+from pathlib import Path
+from typing import Optional
+import subprocess
+
+
+def setup_logging(log_file: Optional[str] = None, log_level: str = "INFO") -> None:
+    """
+    Set up logging configuration for aviation tools.
+
+    Args:
+        log_file: Optional path to log file. If None, only logs to console.
+        log_level: Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+    """
+    level = getattr(logging, log_level.upper(), logging.INFO)
+
+    handlers = [logging.StreamHandler(sys.stdout)]
+
+    if log_file:
+        log_path = Path(log_file)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        handlers.append(logging.FileHandler(log_file))
+
+    logging.basicConfig(
+        level=level,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=handlers
+    )
+
+
+def hash_file(file_path: Path, algorithm: str = "sha256") -> str:
+    """
+    Calculate hash of a file.
+
+    Args:
+        file_path: Path to file
+        algorithm: Hash algorithm (md5, sha1, sha256, etc.)
+
+    Returns:
+        Hexadecimal hash string
+    """
+    hasher = hashlib.new(algorithm)
+
+    with open(file_path, 'rb') as f:
+        for chunk in iter(lambda: f.read(8192), b''):
+            hasher.update(chunk)
+
+    return hasher.hexdigest()
+
+
+def is_sd_card(device_path: Path) -> bool:
+    """
+    Check if a device is likely an SD card.
+
+    Args:
+        device_path: Path to device (e.g., /dev/sda1)
+
+    Returns:
+        True if device appears to be an SD card
+    """
+    # Check if it's a removable device
+    try:
+        # Extract device name (e.g., sda from sda1)
+        device_name = device_path.name.rstrip('0123456789')
+        removable_path = Path(f"/sys/block/{device_name}/removable")
+
+        if removable_path.exists():
+            with open(removable_path, 'r') as f:
+                is_removable = f.read().strip() == '1'
+                return is_removable
+    except Exception:
+        pass
+
+    return False
+
+
+def get_mount_point(device_path: Path) -> Optional[Path]:
+    """
+    Get the mount point for a device.
+
+    Args:
+        device_path: Path to device (e.g., /dev/sda1)
+
+    Returns:
+        Mount point path if mounted, None otherwise
+    """
+    try:
+        result = subprocess.run(
+            ['findmnt', '-n', '-o', 'TARGET', str(device_path)],
+            capture_output=True,
+            text=True,
+            check=False
+        )
+
+        if result.returncode == 0 and result.stdout.strip():
+            return Path(result.stdout.strip())
+    except Exception:
+        pass
+
+    return None
+
+
+def mount_device(device_path: Path, mount_point: Optional[Path] = None, readonly: bool = True) -> Path:
+    """
+    Mount a device.
+
+    Args:
+        device_path: Path to device (e.g., /dev/sda1)
+        mount_point: Optional mount point. If None, creates a temp mount point.
+        readonly: Mount as read-only if True
+
+    Returns:
+        Path where device was mounted
+
+    Raises:
+        RuntimeError: If mount fails
+    """
+    if mount_point is None:
+        mount_point = Path(f"/media/{device_path.name}")
+
+    mount_point.mkdir(parents=True, exist_ok=True)
+
+    mount_cmd = ['mount']
+    if readonly:
+        mount_cmd.extend(['-o', 'ro'])
+    mount_cmd.extend([str(device_path), str(mount_point)])
+
+    result = subprocess.run(mount_cmd, capture_output=True, text=True)
+
+    if result.returncode != 0:
+        raise RuntimeError(f"Failed to mount {device_path}: {result.stderr}")
+
+    return mount_point
+
+
+def unmount_device(mount_point: Path) -> None:
+    """
+    Unmount a device.
+
+    Args:
+        mount_point: Path to mount point
+
+    Raises:
+        RuntimeError: If unmount fails
+    """
+    result = subprocess.run(
+        ['umount', str(mount_point)],
+        capture_output=True,
+        text=True
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(f"Failed to unmount {mount_point}: {result.stderr}")
+
+
+def format_duration(seconds: float) -> str:
+    """
+    Format duration in seconds as human-readable string.
+
+    Args:
+        seconds: Duration in seconds
+
+    Returns:
+        Formatted string (e.g., "2h 30m", "45m 30s")
+    """
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+
+    if hours > 0:
+        return f"{hours}h {minutes}m"
+    elif minutes > 0:
+        return f"{minutes}m {secs}s"
+    else:
+        return f"{secs}s"
+
+
+def parse_duration(duration_str: str) -> float:
+    """
+    Parse human-readable duration to seconds.
+
+    Args:
+        duration_str: Duration string (e.g., "2h 30m", "45m", "1.5h")
+
+    Returns:
+        Duration in seconds
+    """
+    duration_str = duration_str.lower().strip()
+    seconds = 0.0
+
+    # Try to parse as decimal hours (e.g., "1.5h")
+    if 'h' in duration_str and ' ' not in duration_str:
+        try:
+            hours = float(duration_str.replace('h', ''))
+            return hours * 3600
+        except ValueError:
+            pass
+
+    # Parse components
+    parts = duration_str.split()
+    for part in parts:
+        if 'h' in part:
+            seconds += float(part.replace('h', '')) * 3600
+        elif 'm' in part:
+            seconds += float(part.replace('m', '')) * 60
+        elif 's' in part:
+            seconds += float(part.replace('s', ''))
+
+    return seconds
