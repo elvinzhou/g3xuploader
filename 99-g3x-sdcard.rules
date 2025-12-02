@@ -1,0 +1,16 @@
+# G3X SD Card Auto-Processor
+# /etc/udev/rules.d/99-g3x-sdcard.rules
+#
+# This rule triggers the G3X processor when an SD card is inserted.
+# It uses systemd to properly handle the long-running process.
+
+# Match USB storage devices (SD card readers)
+ACTION=="add", KERNEL=="sd[a-z][0-9]", SUBSYSTEM=="block", \
+    ENV{ID_FS_TYPE}=="vfat", \
+    TAG+="systemd", ENV{SYSTEMD_WANTS}="g3x-processor@%k.service"
+
+# Alternative: Match specific SD card reader by vendor/product ID
+# Uncomment and modify if you want to only trigger on a specific reader
+# ACTION=="add", KERNEL=="sd[a-z][0-9]", SUBSYSTEM=="block", \
+#     ATTRS{idVendor}=="1234", ATTRS{idProduct}=="5678", \
+#     TAG+="systemd", ENV{SYSTEMD_WANTS}="g3x-processor@%k.service"
