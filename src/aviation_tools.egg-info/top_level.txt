@@ -1,2 +1,0 @@
-aviation_tools
-g3x_db_updater

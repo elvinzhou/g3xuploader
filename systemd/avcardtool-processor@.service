@@ -1,0 +1,28 @@
+[Unit]
+Description=AVCardTool Processor for %i
+Documentation=https://github.com/your-org/avcardtool
+BindsTo=dev-%i.device
+After=dev-%i.device
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/avcardtool auto-process /dev/%i
+StandardOutput=journal
+StandardError=journal
+User=avcardtool
+Group=avcardtool
+
+# Security hardening
+PrivateTmp=yes
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/avcardtool /var/log
+
+# Resource limits
+TimeoutStartSec=600
+CPUQuota=50%
+MemoryLimit=512M
+
+[Install]
+WantedBy=multi-user.target

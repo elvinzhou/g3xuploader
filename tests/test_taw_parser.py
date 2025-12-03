@@ -5,7 +5,7 @@ from pathlib import Path
 import struct
 import io
 
-from g3x_db_updater.taw_parser import (
+from avcardtool.navdata.garmin.taw_parser import (
     TAWParser, TAWExtractor, TAWFile, TAWHeader, TAWRegion,
     TAWParseError, TAW_REGION_PATHS, TAWRegionType
 )

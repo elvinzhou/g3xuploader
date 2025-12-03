@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch, MagicMock
 import json
 import os
 
-from g3x_db_updater.sdcard_writer import (
+from avcardtool.navdata.sdcard import (
     SDCardInfo, SDCardDetector, G3XDatabaseWriter,
     AutoDatabaseUpdater, WriteResult, DatabaseVersion,
     SDCardError, SDCardNotFoundError,

@@ -1,4 +1,4 @@
-# Aviation Tools - Architecture Design
+# AVCardTool - Architecture Design
 
 ## Overview
 
@@ -17,9 +17,9 @@ This project merges two separate tools into one modular system:
 ## Project Structure
 
 ```
-aviation-tools/
+avcardtool/
 ├── src/
-│   └── aviation_tools/
+│   └── avcardtool/
 │       ├── __init__.py
 │       ├── cli.py                          # Main CLI entry point
 │       │
@@ -71,8 +71,8 @@ aviation-tools/
 ├── README.md                                # Main documentation
 │
 ├── systemd/                                 # System integration
-│   ├── 99-aviation-sdcard.rules            # Unified udev rules
-│   └── aviation-processor@.service         # Unified systemd service
+│   ├── 99-avcardtool-sdcard.rules            # Unified udev rules
+│   └── avcardtool-processor@.service         # Unified systemd service
 │
 └── tests/                                   # Test suite
     ├── test_flight_data/
@@ -82,7 +82,7 @@ aviation-tools/
 
 ## Module Responsibilities
 
-### Core Module (`aviation_tools.core`)
+### Core Module (`avcardtool.core`)
 
 **Purpose**: Shared functionality used across all modules
 
@@ -98,7 +98,7 @@ aviation-tools/
   - Path management
   - SD card detection helpers
 
-### Flight Data Module (`aviation_tools.flight_data`)
+### Flight Data Module (`avcardtool.flight_data`)
 
 **Purpose**: Process flight logs from various manufacturers
 
@@ -175,7 +175,7 @@ Service-specific upload implementations:
 - **savvy_aviation.py**: Savvy Aviation staging (no API)
 - **maintenance_tracker.py**: Generic webhook uploader
 
-### Navigation Database Module (`aviation_tools.navdata`)
+### Navigation Database Module (`avcardtool.navdata`)
 
 **Purpose**: Download and install aviation databases
 
@@ -220,33 +220,33 @@ Using Click for a unified command-line interface:
 
 ```bash
 # Main command groups
-aviation-tools [OPTIONS] COMMAND [ARGS]...
+avcardtool [OPTIONS] COMMAND [ARGS]...
 
 # Flight data commands
-aviation-tools flight process [SD_CARD_PATH]
-aviation-tools flight analyze LOG_FILE
-aviation-tools flight list-processors
-aviation-tools flight upload LOG_FILE --service cloudahoy
+avcardtool flight process [SD_CARD_PATH]
+avcardtool flight analyze LOG_FILE
+avcardtool flight list-processors
+avcardtool flight upload LOG_FILE --service cloudahoy
 
 # Navigation database commands
-aviation-tools navdata login
-aviation-tools navdata list-databases
-aviation-tools navdata download [--all | --indices 0,1,2]
-aviation-tools navdata install TAW_FILE [SD_CARD_PATH]
-aviation-tools navdata auto-update
+avcardtool navdata login
+avcardtool navdata list-databases
+avcardtool navdata download [--all | --indices 0,1,2]
+avcardtool navdata install TAW_FILE [SD_CARD_PATH]
+avcardtool navdata auto-update
 
 # Combined automatic operation
-aviation-tools auto-process [SD_CARD_PATH]  # Does both flight data + navdata
+avcardtool auto-process [SD_CARD_PATH]  # Does both flight data + navdata
 
 # Configuration
-aviation-tools config show
-aviation-tools config edit
-aviation-tools config validate
+avcardtool config show
+avcardtool config edit
+avcardtool config validate
 ```
 
 ## Configuration
 
-Unified configuration file: `/etc/aviation_tools/config.json`
+Unified configuration file: `/etc/avcardtool/config.json`
 
 ```json
 {
@@ -277,8 +277,8 @@ Unified configuration file: `/etc/aviation_tools/config.json`
     }
   },
   "system": {
-    "data_dir": "/var/lib/aviation_tools",
-    "log_file": "/var/log/aviation_tools.log"
+    "data_dir": "/var/lib/avcardtool",
+    "log_file": "/var/log/avcardtool.log"
   }
 }
 ```
@@ -287,23 +287,23 @@ Unified configuration file: `/etc/aviation_tools/config.json`
 
 Single unified service that handles both functions:
 
-**Udev Rule** (`99-aviation-sdcard.rules`):
+**Udev Rule** (`99-avcardtool-sdcard.rules`):
 ```
 ACTION=="add", KERNEL=="sd[a-z][0-9]", SUBSYSTEM=="block", \
     ENV{ID_FS_TYPE}=="vfat", \
-    TAG+="systemd", ENV{SYSTEMD_WANTS}="aviation-processor@%k.service"
+    TAG+="systemd", ENV{SYSTEMD_WANTS}="avcardtool-processor@%k.service"
 ```
 
-**Systemd Service** (`aviation-processor@.service`):
+**Systemd Service** (`avcardtool-processor@.service`):
 ```ini
 [Unit]
-Description=Aviation Tools Processor for %i
+Description=AVCardTool Processor for %i
 BindsTo=dev-%i.device
 After=dev-%i.device
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/aviation-tools auto-process /dev/%i
+ExecStart=/usr/local/bin/avcardtool auto-process /dev/%i
 ```
 
 ## Data Flow
@@ -311,7 +311,7 @@ ExecStart=/usr/local/bin/aviation-tools auto-process /dev/%i
 ### SD Card Insertion
 
 1. **Udev** detects SD card insertion
-2. **Systemd** starts `aviation-processor@` service
+2. **Systemd** starts `avcardtool-processor@` service
 3. **CLI** invokes `auto-process` command
 4. **Flight Data Module**:
    - Detects and parses flight logs
@@ -329,7 +329,7 @@ ExecStart=/usr/local/bin/aviation-tools auto-process /dev/%i
 
 1. Create new processor in `processors/`:
    ```python
-   from aviation_tools.flight_data.base import FlightDataProcessor
+   from avcardtool.flight_data.base import FlightDataProcessor
 
    class DynonSkyViewProcessor(FlightDataProcessor):
        def detect_log_format(self, file_path):
@@ -353,7 +353,7 @@ ExecStart=/usr/local/bin/aviation-tools auto-process /dev/%i
 
 1. Create new uploader in `uploaders/`:
    ```python
-   from aviation_tools.flight_data.base import FlightDataUploader
+   from avcardtool.flight_data.base import FlightDataUploader
 
    class MyServiceUploader(FlightDataUploader):
        def authenticate(self):
@@ -367,7 +367,7 @@ ExecStart=/usr/local/bin/aviation-tools auto-process /dev/%i
 
 ### Adding Support for Another Manufacturer's Databases
 
-1. Create new module: `aviation_tools.navdata.dynon/`
+1. Create new module: `avcardtool.navdata.dynon/`
 2. Implement similar interfaces to `garmin/`
 3. Keep separate for potential upstream contribution
 

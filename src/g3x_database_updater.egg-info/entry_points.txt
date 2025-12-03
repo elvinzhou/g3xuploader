@@ -1,2 +1,0 @@
-[console_scripts]
-g3x-db-updater = g3x_db_updater.cli:main

@@ -1,100 +1,288 @@
-# G3X Flight Data Processor
+# AVCardTool
 
-Automatically process Garmin G3X Touch flight logs, calculate Hobbs/Tach times, detect OOOI (Out/Off/On/In) times, and upload to flight tracking services.
+**Unified flight data processing and navigation database management for general aviation**
+
+AVCardTool combines two essential capabilities for general aviation into one streamlined system:
+
+1. **Flight Data Processing** - Automatically process flight logs, calculate Hobbs/Tach times, detect OOOI events, and upload to tracking services
+2. **Navigation Database Management** - Download and install aviation databases (NavData, Terrain, Obstacles, Charts) to SD cards
 
 ## Features
 
-- **Automatic SD Card Detection**: Processes G3X SD cards automatically when inserted
+### Flight Data Processing
+
+- **Multi-Manufacturer Support**: Modular architecture supports multiple avionics manufacturers
+  - Garmin G3X Touch (implemented)
+  - Dynon, Aspen, Avidyne (PR Welcome)
+- **Automatic SD Card Detection**: Processes data automatically when SD cards are inserted
 - **Flight Detection**: Intelligently distinguishes actual flights from power-on cycles
-- **Hobbs/Tach Calculation**: Mirrors G3X configuration options
-- **OOOI Times**: Automatically detects engine start/stop and takeoff/landing
-- **Multiple Upload Services**: Savvy Aviation, CloudAhoy, and custom maintenance trackers
+- **Hobbs/Tach Calculation**: Configurable calculation modes mirror avionics settings
+- **OOOI Times**: Automatic detection of Out/Off/On/In events
+- **Multiple Upload Services**:
+  - CloudAhoy
+  - FlySto
+  - Savvy Aviation staging
+  - Custom maintenance trackers
 - **Deduplication**: Tracks processed files to avoid re-uploading
+
+### Navigation Database Management
+
+- **Garmin Portal Authentication**: Secure login to flyGarmin for database access
+- **TAW/AWP File Support**: Parse and extract Garmin's proprietary database formats
+- **Automatic Updates**: Download latest subscribed databases
+- **SD Card Installation**: Write files in G3X-compatible directory structure
+- **Version Tracking**: Track installed database versions
+- **Multiple Database Types**:
+  - Navigation data
+  - Terrain databases
+  - Obstacle databases
+  - FliteCharts
+
+## Architecture
+
+AVCardTool uses a modular architecture that keeps concerns separated:
+
+```
+avcardtool/
+├── core/              # Shared configuration and utilities
+├── flight_data/       # Flight data processing module
+│   ├── base/          # Abstract interfaces
+│   ├── processors/    # Manufacturer-specific parsers
+│   ├── analyzers/     # Hobbs/Tach/OOOI analysis
+│   └── uploaders/     # Upload service integrations
+└── navdata/           # Navigation database module
+    └── garmin/        # Garmin-specific (for upstream contribution)
+```
+
+This design enables:
+- Easy addition of new manufacturers
+- Independent development of each module
+- Upstream contribution of Garmin navdata code
+- Clear separation of concerns
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed architecture documentation.
 
 ## Installation
 
-### On Raspberry Pi
+### Raspberry Pi (Recommended)
 
 ```bash
-# Clone or copy the files to your Pi
-cd g3x_flight_processor
+# Clone the repository
+git clone https://github.com/yourusername/avcardtool.git
+cd avcardtool
 
-# Run the installer
+# Run the unified installer
 sudo ./install.sh
-
-# Edit your configuration
-sudo nano /etc/g3x_processor/config.json
 ```
+
+The installer will:
+1. Install system dependencies
+2. Create a Python virtual environment
+3. Install the avcardtool package
+4. Set up configuration
+5. Install udev rules for automatic SD card detection
+6. Install systemd service
 
 ### Manual Installation
 
 ```bash
 # Install dependencies
-sudo apt-get install python3 python3-pip
-pip3 install requests
+sudo apt-get install python3 python3-pip python3-venv
 
-# Copy files
-sudo cp g3x_processor.py /usr/local/bin/
-sudo chmod +x /usr/local/bin/g3x_processor.py
-sudo mkdir -p /etc/g3x_processor
-sudo cp config.json /etc/g3x_processor/
+# Create and activate virtual environment
+python3 -m venv venv
+source venv/bin/activate
 
-# For automatic SD card detection:
-sudo cp 99-g3x-sdcard.rules /etc/udev/rules.d/
-sudo cp g3x-processor@.service /lib/systemd/system/
-sudo udevadm control --reload-rules
-sudo systemctl daemon-reload
+# Install package
+pip install -e .
+
+# Generate default configuration
+avcardtool config generate config.json
 ```
 
 ## Configuration
 
-Edit `/etc/g3x_processor/config.json`:
+Configuration is stored in `/etc/avcardtool/config.json` (or `~/.config/avcardtool/config.json`).
 
-### Engine Time (Tach)
+### Generate Default Configuration
+
+```bash
+avcardtool config generate /etc/avcardtool/config.json
+```
+
+### Configuration Structure
 
 ```json
-"engine_time": {
-    "mode": "variable",           // "variable" or "fixed"
-    "minimum_recording_rpm": 500, // RPM threshold to start recording
-    "reference_rpm": 2700         // For variable mode: RPM at which tach = 1:1
+{
+  "flight_data": {
+    "enabled": true,
+    "engine_time": {
+      "mode": "variable",
+      "minimum_recording_rpm": 500,
+      "reference_rpm": 2700
+    },
+    "airframe_time": {
+      "trigger": "oil_pressure",
+      "oil_pressure_threshold": 5.0
+    },
+    "uploaders": {
+      "cloudahoy": {
+        "enabled": true,
+        "api_token": "your-token"
+      }
+    }
+  },
+  "navdata": {
+    "enabled": true,
+    "auto_download": true,
+    "garmin": {
+      "email": "your@email.com",
+      "databases": ["navdata", "terrain", "obstacles"]
+    }
+  }
 }
 ```
 
-**Variable Mode**: Tach accrues at `(current_rpm / reference_rpm)` rate
+### Migrate Legacy Configuration
+
+If you're upgrading from the original g3x_processor:
+
+```bash
+avcardtool config migrate /etc/g3x_processor/config.json /etc/avcardtool/config.json
+```
+
+## Usage
+
+### Command-Line Interface
+
+AVCardTool provides a unified CLI with subcommands:
+
+```bash
+# View help
+avcardtool --help
+
+# Configuration commands
+avcardtool config show                    # Show current config
+avcardtool config validate                # Validate config
+avcardtool config generate config.json    # Generate default config
+
+# Flight data commands
+avcardtool flight process [PATH]          # Process flight data
+avcardtool flight analyze LOG_FILE        # Analyze single log
+avcardtool flight list-processors         # List supported formats
+
+# Navigation database commands
+avcardtool navdata login                  # Login to Garmin
+avcardtool navdata list-databases         # List available databases
+avcardtool navdata download all           # Download databases
+avcardtool navdata install DB.taw         # Install to SD card
+avcardtool navdata auto-update            # Full automatic update
+
+# Automatic processing (used by systemd)
+avcardtool auto-process [DEVICE]          # Process both flight data and navdata
+```
+
+### Automatic SD Card Processing
+
+When you insert an SD card:
+
+1. **Udev** detects the insertion
+2. **Systemd** starts the aviation-processor service
+3. **Flight data** is processed if enabled
+4. **Navdata updates** are checked and installed if enabled
+5. **Card is unmounted** when complete
+
+View processing logs:
+
+```bash
+# Real-time logs
+journalctl -u avcardtool-processor@* -f
+
+# Application logs
+tail -f /var/log/avcardtool/avcardtool.log
+```
+
+### Flight Data Processing
+
+#### Engine Time (Tach)
+
+Configure how engine time accrues:
+
+**Variable Mode** (recommended for aircraft with constant-speed props):
+```json
+"engine_time": {
+    "mode": "variable",
+    "reference_rpm": 2700
+}
+```
 - At 2700 RPM: 1 hour flight = 1.0 tach hour
 - At 2400 RPM: 1 hour flight = 0.89 tach hour
 
-**Fixed Mode**: Tach accrues at 1:1 when RPM > minimum_recording_rpm
+**Fixed Mode** (for aircraft with fixed-pitch props):
+```json
+"engine_time": {
+    "mode": "fixed",
+    "minimum_recording_rpm": 500
+}
+```
+- When RPM > 500: 1 hour flight = 1.0 tach hour
 
-### Airframe Time (Hobbs)
+#### Airframe Time (Hobbs)
+
+Configure when Hobbs time accrues:
 
 ```json
 "airframe_time": {
-    "trigger": "oil_pressure",      // "rpm", "oil_pressure", or "flight_time"
-    "rpm_threshold": 500,           // If trigger is "rpm"
-    "oil_pressure_threshold": 5.0,  // If trigger is "oil_pressure" (PSI)
-    "airborne_speed_threshold": 50.0 // If trigger is "flight_time" (knots)
+    "trigger": "oil_pressure",         // "rpm", "oil_pressure", or "flight_time"
+    "oil_pressure_threshold": 5.0      // PSI
 }
 ```
 
-### Flight Detection
+#### Flight Detection
 
-Logs without actual flight are automatically filtered out:
+Avoid uploading non-flight power-on cycles:
 
 ```json
 "flight_detection": {
-    "minimum_flight_time_minutes": 5.0,   // Must be airborne this long
-    "minimum_ground_speed_kts": 50.0,     // Must reach this speed
-    "minimum_altitude_change_ft": 200.0,  // Must climb this much
-    "minimum_data_points": 300            // At least 5 minutes of data
+    "minimum_flight_time_minutes": 5.0,
+    "minimum_ground_speed_kts": 50.0,
+    "minimum_altitude_change_ft": 200.0
 }
 ```
 
-### Upload Services
+### Navigation Database Management
 
-#### CloudAhoy
+#### One-Time Setup
 
-CloudAhoy has an API but requires approval. Contact team@cloudahoy.com for access.
+```bash
+# Login to Garmin
+avcardtool navdata login
+
+# List available databases
+avcardtool navdata list-databases
+```
+
+#### Download and Install
+
+```bash
+# Download all subscribed databases
+avcardtool navdata download all
+
+# Download specific databases
+avcardtool navdata download 0,1,2
+
+# Install to SD card
+avcardtool navdata install database.taw
+
+# All-in-one automatic update
+avcardtool navdata auto-update
+```
+
+## Upload Services
+
+### CloudAhoy
+
+CloudAhoy has an API but requires approval. Contact team@cloudahoy.com.
 
 ```json
 "cloudahoy": {
@@ -103,56 +291,32 @@ CloudAhoy has an API but requires approval. Contact team@cloudahoy.com for acces
 }
 ```
 
-#### FlySto
+### FlySto
 
-FlySto uses OAuth2 authentication. You need to register your application with FlySto first.
-
-1. Contact FlySto (support@flysto.net) to register your application
-2. They will provide you with a `client_id` and `client_secret`
-3. Configure your settings:
+FlySto uses OAuth2. Contact support@flysto.net to register your application.
 
 ```json
 "flysto": {
     "enabled": true,
     "client_id": "your-client-id",
-    "client_secret": "your-client-secret",
-    "redirect_uri": "http://localhost:8080/callback"
+    "client_secret": "your-client-secret"
 }
 ```
 
-4. Complete the OAuth authorization (one-time setup):
+### Savvy Aviation
 
-```bash
-# Get the authorization URL
-g3x_processor.py --flysto-auth-url
-
-# Open the URL in your browser, login to FlySto, grant permission
-# You'll be redirected to: http://localhost:8080/callback?code=XXXXXX
-# Copy the code value
-
-# Exchange the code for tokens
-g3x_processor.py --flysto-auth XXXXXX
-```
-
-After this setup, uploads will work automatically. Tokens are stored in
-`/var/lib/g3x_processor/flysto_tokens.json` and automatically refreshed.
-
-#### Savvy Aviation
-
-Savvy Aviation doesn't have a public API. Files are staged to 
-`/var/lib/g3x_processor/savvy_staging/` for manual upload.
+Savvy doesn't have a public API. Files are staged for manual upload.
 
 ```json
 "savvy_aviation": {
     "enabled": true,
-    "email": "your-email@example.com",
-    "password": "your-password"
+    "email": "your@email.com"
 }
 ```
 
-#### Custom Maintenance Tracker
+### Custom Maintenance Tracker
 
-POST JSON payload to your API:
+POST JSON payload to your own API:
 
 ```json
 "maintenance_tracker": {
@@ -162,124 +326,155 @@ POST JSON payload to your API:
 }
 ```
 
-Payload format:
-```json
-{
-    "aircraft_ident": "N12345",
-    "date": "2024-01-15",
-    "hobbs": {"start": 110.4, "end": 112.6, "increment": 2.16},
-    "tach": {"start": 70.3, "end": 72.1, "increment": 1.83},
-    "oooi": {
-        "out": "2024-01-15T14:58:23",
-        "off": "2024-01-15T15:02:57",
-        "on": "2024-01-15T17:04:35",
-        "in": "2024-01-15T17:07:54",
-        "block_time_minutes": 129.5,
-        "flight_time_minutes": 121.6
-    }
-}
+## Extending AVCardTool
+
+### Adding Support for a New Manufacturer
+
+1. Create a new processor in `avcardtool/flight_data/processors/`:
+
+```python
+from avcardtool.flight_data.base import FlightDataProcessor, FlightData
+
+class DynonSkyViewProcessor(FlightDataProcessor):
+    def detect_log_format(self, file_path):
+        # Check if this is a Dynon log file
+        ...
+
+    def parse_log(self, file_path):
+        # Parse Dynon-specific format
+        ...
+
+    def extract_metadata(self, file_path):
+        # Extract metadata
+        ...
 ```
 
-## Usage
+2. Register the processor in `processors/__init__.py`
 
-### Automatic Processing
+3. Test with sample log files
 
-Just insert the G3X SD card into the Raspberry Pi's USB card reader. The system will:
+### Adding a New Upload Service
 
-1. Detect the card insertion
-2. Mount it read-only
-3. Scan for G3X log files
-4. Analyze each file
-5. Skip non-flight logs (power-on only)
-6. Calculate Hobbs/Tach for actual flights
-7. Upload to configured services
-8. Unmount the card
+1. Create a new uploader in `avcardtool/flight_data/uploaders/`:
 
-Check the log:
-```bash
-journalctl -u g3x-processor@* -f
+```python
+from avcardtool.flight_data.base import FlightDataUploader, UploadResult
+
+class MyServiceUploader(FlightDataUploader):
+    def authenticate(self):
+        # Authenticate with service
+        ...
+
+    def upload_flight(self, flight_data, analysis_results):
+        # Upload to service
+        ...
 ```
 
-### Manual Processing
+2. Add configuration schema to `config.py`
 
-```bash
-# Process an SD card manually
-sudo g3x_processor.py /media/g3x_sdcard
-
-# Analyze a single file
-g3x_processor.py --analyze /path/to/log_20241115_143000_KHHR.csv
-
-# JSON output
-g3x_processor.py --analyze /path/to/log.csv --json
-
-# Generate sample config
-g3x_processor.py --generate-config --config my_config.json
-```
-
-## File Structure
-
-```
-/etc/g3x_processor/
-└── config.json              # Configuration file
-
-/var/lib/g3x_processor/
-├── processed_files.json     # Database of processed files
-└── savvy_staging/           # Files staged for Savvy Aviation upload
-
-/var/log/
-└── g3x_processor.log        # Application log
-```
+3. Test with actual flight data
 
 ## Troubleshooting
 
-### SD card not detected
+### SD Card Not Detected
 
-Check udev rules are loaded:
 ```bash
+# Check udev rules
 sudo udevadm control --reload-rules
 sudo udevadm trigger
+
+# Test manually
+avcardtool auto-process /dev/sda1
 ```
 
-Test manually:
-```bash
-sudo mount /dev/sda1 /mnt/test
-sudo g3x_processor.py /mnt/test
-```
-
-### Permission errors
-
-Ensure the config file is readable:
-```bash
-sudo chmod 644 /etc/g3x_processor/config.json
-```
-
-### View logs
+### View Logs
 
 ```bash
-# Live log
-journalctl -u g3x-processor@* -f
+# System logs
+journalctl -u avcardtool-processor@* -f
 
-# All processor logs
-cat /var/log/g3x_processor.log
+# Application logs
+tail -f /var/log/avcardtool/avcardtool.log
 ```
 
-## CSV Format
+### Validate Configuration
 
-The processor reads G3X CSV files with this format:
+```bash
+avcardtool config validate
+```
 
-- Line 1: `#airframe_info,aircraft_ident="N12345",airframe_hours="110.4",engine_hours="70.3",...`
-- Line 2: Full column headers
-- Line 3: Short column headers
-- Line 4+: Data at 1Hz
+### Permission Errors
 
-Key columns used:
-- Column 1: Date (YYYY-MM-DD)
-- Column 2: Time (HH:MM:SS)
-- Column 10: GPS Ground Speed (kt)
-- Column 20: Baro Altitude (ft)
-- Column 86: RPM
-- Column 87: Oil Press (PSI)
+```bash
+# Ensure config is readable
+sudo chmod 644 /etc/avcardtool/config.json
+
+# Check data directory permissions
+ls -la /var/lib/avcardtool
+```
+
+## Development
+
+### Setup Development Environment
+
+```bash
+git clone https://github.com/yourusername/avcardtool.git
+cd avcardtool
+
+# Create virtual environment
+python3 -m venv venv
+source venv/bin/activate
+
+# Install in editable mode with dev dependencies
+pip install -e ".[dev]"
+
+# Run tests
+pytest
+
+# Format code
+black src/
+isort src/
+```
+
+### Running Tests
+
+```bash
+# All tests
+pytest
+
+# With coverage
+pytest --cov=avcardtool
+
+# Specific test file
+pytest tests/test_config.py
+```
+
+## Credits and Acknowledgments
+
+This project combines and enhances two separate tools:
+
+- **Flight Data Processor**: Original G3X flight data processing
+- **Navigation Database Updater**: Based on [jdmtool](https://github.com/dimaryaz/jdmtool) by dimaryaz
+
+Special thanks to:
+- [jdmtool](https://github.com/dimaryaz/jdmtool) - TAW format research and Garmin authentication
+- [garth](https://github.com/matin/garth) - Garmin SSO patterns
+- The aviation community for testing and feedback
+
+## Contributing
+
+Contributions are welcome! The modular architecture makes it easy to add support for new manufacturers and services.
+
+### Contributing Upstream
+
+The `avcardtool/navdata/garmin/` module is kept separate specifically to enable contributions back to [jdmtool](https://github.com/dimaryaz/jdmtool). If you improve the Garmin database handling, please consider contributing upstream.
 
 ## License
 
-MIT License - feel free to modify and distribute.
+MIT License - see [LICENSE](LICENSE) for details.
+
+## Disclaimer
+
+This tool is not affiliated with or endorsed by Garmin or any other avionics manufacturer. Always verify flight data and database installations through official methods before flight.
+
+Use at your own risk. The authors are not responsible for any issues arising from use of this software.
