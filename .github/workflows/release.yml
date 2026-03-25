@@ -30,7 +30,8 @@ jobs:
             poetry install --no-root
             
             # 2. Compile standalone binary with Nuitka
-            export PYTHONPATH=$PYTHONPATH:$(pwd)/src
+            # Using a safe assignment for PYTHONPATH to avoid 'unbound variable' errors
+            export PYTHONPATH="${PYTHONPATH:-}:$(pwd)/src"
             poetry run python3 -m nuitka \
                 --onefile \
                 --standalone \
