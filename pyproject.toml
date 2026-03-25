@@ -1,17 +1,11 @@
-[build-system]
-requires = ["setuptools>=61.0", "wheel"]
-build-backend = "setuptools.build_meta"
-
-[project]
+[tool.poetry]
 name = "avcardtool"
 version = "1.0.0"
 description = "Aviation SD card tool - Flight data processing and navigation database management for general aviation"
+authors = ["AVCardTool Contributors"]
+license = "MIT"
 readme = "README.md"
-license = {text = "MIT"}
-requires-python = ">=3.9"
-authors = [
-    {name = "AVCardTool Contributors"}
-]
+packages = [{include = "avcardtool", from = "src"}]
 keywords = [
     "aviation",
     "flight-data",
@@ -37,32 +31,30 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering",
 ]
-dependencies = [
-    "requests>=2.28.0",
-    "click>=8.0.0",
-]
 
-[project.optional-dependencies]
-dev = [
-    "pytest>=7.0.0",
-    "pytest-cov>=4.0.0",
-    "black>=23.0.0",
-    "isort>=5.12.0",
-    "mypy>=1.0.0",
-    "types-requests>=2.28.0",
-]
+[tool.poetry.dependencies]
+python = ">=3.9,<3.13"
+requests = "^2.28.0"
+click = "^8.0.0"
 
-[project.scripts]
+[tool.poetry.group.dev.dependencies]
+pytest = "^7.0.0"
+pytest-cov = "^4.0.0"
+black = "^23.0.0"
+isort = "^5.12.0"
+mypy = "^1.0.0"
+types-requests = "^2.28.0"
+pyinstaller = "^6.19.0"
+nuitka = "^4.0.7"
+
+[tool.poetry.scripts]
 avcardtool = "avcardtool.cli:main"
 
-[project.urls]
+[tool.poetry.urls]
 Homepage = "https://github.com/yourusername/avcardtool"
 Repository = "https://github.com/yourusername/avcardtool.git"
 Issues = "https://github.com/yourusername/avcardtool/issues"
 Documentation = "https://github.com/yourusername/avcardtool/blob/main/README.md"
-
-[tool.setuptools.packages.find]
-where = ["src"]
 
 [tool.black]
 line-length = 100
@@ -83,3 +75,7 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
 addopts = "-v --cov=avcardtool --cov-report=term-missing"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

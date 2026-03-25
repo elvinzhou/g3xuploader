@@ -1,0 +1,61 @@
+name: Release Build
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-arm64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Build ARM64 Standalone Binary and .deb
+        uses: uraimo/run-on-arch-action@v2
+        with:
+          arch: aarch64
+          distro: ubuntu22.04
+          githubToken: ${{ github.token }}
+          install: |
+            apt-get update -y
+            apt-get install -y python3 python3-pip patchelf gcc python3-dev
+            pip3 install poetry
+          run: |
+            # 1. Install dependencies and lock
+            poetry install --no-root
+            
+            # 2. Compile standalone binary with Nuitka
+            export PYTHONPATH=$PYTHONPATH:$(pwd)/src
+            poetry run python3 -m nuitka \
+                --onefile \
+                --standalone \
+                --include-package=avcardtool \
+                src/avcardtool/cli.py \
+                -o avcardtool-compiled
+            
+            # 3. Build .deb package
+            chmod +x package_deb.sh
+            ./package_deb.sh
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: avcardtool-arm64
+          path: |
+            avcardtool-compiled
+            dist/*.deb
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            avcardtool-compiled
+            dist/*.deb
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

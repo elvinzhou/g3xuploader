@@ -108,10 +108,14 @@ class Config:
         Path.home() / ".avcardtool" / "config.json",
     ]
 
-    # Legacy config paths for migration
-    LEGACY_PATHS = [
-        Path("/etc/g3x_processor/config.json"),
-    ]
+    @staticmethod
+    def get_base_dir() -> Path:
+        """Get the base directory of the application, handling standalone binary mode."""
+        import sys
+        if getattr(sys, 'frozen', False):
+            # Running as a bundled binary (Nuitka/PyInstaller)
+            return Path(sys.executable).parent
+        return Path(__file__).parent.parent.parent
 
     def __init__(self, config_path: Optional[Path] = None):
         """

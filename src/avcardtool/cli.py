@@ -645,8 +645,33 @@ def navdata(ctx):
 @click.pass_context
 def navdata_login(ctx, email: str, password: str, force: bool):
     """Login to Garmin flyGarmin portal."""
-    click.echo("Garmin authentication functionality coming soon...")
-    click.echo(f"Would authenticate: {email}")
+    from avcardtool.navdata.garmin.auth import GarminAuth, GarminAuthError
+    
+    auth = GarminAuth()
+    
+    if auth.is_authenticated() and not force:
+        click.echo(f"Already authenticated as {auth.tokens.display_name}")
+        return
+
+    def get_mfa_code():
+        click.echo("\n" + "!" * 40)
+        click.echo("Multi-Factor Authentication Required")
+        click.echo("!" * 40)
+        return click.prompt("Enter the verification code sent to your email/phone")
+
+    try:
+        click.echo(f"Logging in to flyGarmin as {email}...")
+        success = auth.login(email, password, mfa_callback=get_mfa_code)
+        
+        if success:
+            click.echo(f"✓ Login successful! Tokens saved to {auth.token_file}")
+            click.echo("You can now download and update databases.")
+    except GarminAuthError as e:
+        click.echo(f"✗ Login failed: {e}", err=True)
+        sys.exit(1)
+    except Exception as e:
+        click.echo(f"✗ Unexpected error during login: {e}", err=True)
+        sys.exit(1)
 
 
 @navdata.command('list-databases')
