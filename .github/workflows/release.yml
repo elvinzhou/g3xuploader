@@ -27,14 +27,19 @@ jobs:
             pip3 install poetry
           run: |
             # 1. Install dependencies and lock
+            # Added zstandard for better one-file compression
+            pip3 install zstandard
             poetry install --no-root
             
             # 2. Compile standalone binary with Nuitka
-            # Using a safe assignment for PYTHONPATH to avoid 'unbound variable' errors
+            # --lto=no: Disables memory-heavy optimization that crashes emulated GCC
+            # --jobs=1: Limits parallelism to prevent memory exhaustion in QEMU
             export PYTHONPATH="${PYTHONPATH:-}:$(pwd)/src"
             poetry run python3 -m nuitka \
                 --onefile \
                 --standalone \
+                --lto=no \
+                --jobs=1 \
                 --include-package=avcardtool \
                 src/avcardtool/cli.py \
                 -o avcardtool-compiled
