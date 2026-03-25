@@ -20,10 +20,10 @@ jobs:
           sudo rm -rf /usr/share/dotnet
           sudo rm -rf /opt/ghc
           sudo rm -rf "/usr/local/share/boost"
-          # Ensure any existing swap is off and the file is removed before creation
           sudo swapoff -a || true
           sudo rm -f /swapfile
-          sudo fallocate -l 8G /swapfile
+          # Increase to 12GB swap for heavy duty emulation
+          sudo fallocate -l 12G /swapfile
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon /swapfile
@@ -41,19 +41,18 @@ jobs:
             pip3 install poetry
           run: |
             # 1. Install dependencies and lock
-            # Added zstandard for better one-file compression
             pip3 install zstandard
             poetry install --no-root
             
             # 2. Compile standalone binary with Nuitka
-            # --lto=no: Disables memory-heavy optimization that crashes emulated GCC
-            # --jobs=1: Limits parallelism to prevent memory exhaustion in QEMU
+            # --python-flag=no_docstrings: Further reduces C code size and RAM usage
             export PYTHONPATH="${PYTHONPATH:-}:$(pwd)/src"
             poetry run python3 -m nuitka \
                 --onefile \
                 --standalone \
                 --lto=no \
                 --jobs=1 \
+                --python-flag=no_docstrings \
                 --include-package=avcardtool \
                 src/avcardtool/cli.py \
                 -o avcardtool-compiled
