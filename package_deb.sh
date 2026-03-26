@@ -2,7 +2,7 @@
 # package_deb.sh - Creates a .deb package for AVCardTool
 set -e
 
-VERSION="1.0.0"
+VERSION="1.1.1"
 ARCH="arm64"
 PKG_NAME="avcardtool"
 PKG_DIR="dist/${PKG_NAME}_${VERSION}_${ARCH}"
