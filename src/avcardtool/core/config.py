@@ -93,6 +93,7 @@ class SystemConfig:
     data_dir: str = "/var/lib/avcardtool"
     log_file: str = "/var/log/avcardtool.log"
     log_level: str = "INFO"
+    debug: bool = False
 
 
 class Config:
@@ -203,6 +204,7 @@ class Config:
             self.system.data_dir = sys.get("data_dir", self.system.data_dir)
             self.system.log_file = sys.get("log_file", self.system.log_file)
             self.system.log_level = sys.get("log_level", self.system.log_level)
+            self.system.debug = sys.get("debug", self.system.debug)
 
     def save(self, path: Optional[Path] = None) -> None:
         """
@@ -328,9 +330,16 @@ class Config:
             Config instance with defaults
         """
         config = cls()
+        
+        # Enable debug by default for initial setup/debugging
+        config.system.debug = True
 
         # Set some example uploader configs
         config.flight_data.uploaders = {
+            "mock": UploaderConfig(
+                enabled=True,
+                config={"description": "Logs payloads for debugging"}
+            ),
             "cloudahoy": UploaderConfig(
                 enabled=False,
                 config={"api_token": "your-oauth-token"}

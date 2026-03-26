@@ -252,6 +252,19 @@ class SDCardDetector:
     def _get_volume_id(self, device_path: str) -> str:
         """Get the FAT32 volume ID for a device"""
         try:
+            # Try using lsblk first
+            result = subprocess.run(
+                ['lsblk', '-d', '-o', 'UUID', '-n', device_path],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout.strip()
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+
+        try:
             # Try using blkid
             result = subprocess.run(
                 ['blkid', '-s', 'UUID', '-o', 'value', device_path],
@@ -259,7 +272,7 @@ class SDCardDetector:
                 text=True,
                 timeout=5
             )
-            if result.returncode == 0:
+            if result.returncode == 0 and result.stdout.strip():
                 return result.stdout.strip()
         except (subprocess.TimeoutExpired, FileNotFoundError):
             pass

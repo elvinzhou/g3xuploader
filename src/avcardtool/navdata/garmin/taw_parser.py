@@ -381,6 +381,7 @@ class TAWExtractor:
                 
                 if output_path.exists() and not overwrite:
                     logger.warning(f"Skipping existing file: {output_path}")
+                    extracted_files.append(output_path)
                     continue
                 
                 # Create parent directories
@@ -388,12 +389,18 @@ class TAWExtractor:
                 
                 # Extract and write data
                 try:
+                    # Instead of reading everything into memory, we could potentially
+                    # use a streaming decompressor if we wanted to be even more efficient.
+                    # For now, extracting region by region is a good middle ground.
                     data = self.parser.extract_region(f, region)
                     
                     with open(output_path, 'wb') as out:
                         out.write(data)
                     
-                    logger.info(f"Extracted: {output_path} ({len(data)} bytes)")
+                    # Clear data from memory
+                    del data
+                    
+                    logger.info(f"Extracted: {output_path} ({region.uncompressed_size} bytes)")
                     extracted_files.append(output_path)
                     
                 except TAWParseError as e:

@@ -38,7 +38,7 @@ echo ""
 
 echo "[1/7] Installing system dependencies..."
 apt-get update -qq
-apt-get install -y python3 python3-pip python3-venv udev
+apt-get install -y python3 python3-pip python3-venv udev util-linux
 
 # ============================================================================
 # Step 2: Create virtual environment and install package
@@ -57,7 +57,15 @@ python3 -m venv /opt/avcardtool/venv
 # Install the package
 echo "Installing avcardtool package..."
 /opt/avcardtool/venv/bin/pip install --upgrade pip
-/opt/avcardtool/venv/bin/pip install -e .
+
+# Detect if we're in a git clone or running standalone
+if [ -f "pyproject.toml" ]; then
+    echo "Local pyproject.toml found, installing from local source..."
+    /opt/avcardtool/venv/bin/pip install -e .
+else
+    echo "No local source found, installing directly from GitHub..."
+    /opt/avcardtool/venv/bin/pip install "git+https://github.com/yourusername/avcardtool.git"
+fi
 
 # Create symlink for easy access
 rm -f /usr/local/bin/aviation-tools  # Remove legacy symlink

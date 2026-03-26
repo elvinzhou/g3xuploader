@@ -56,7 +56,7 @@ def cli(ctx, config: Optional[Path], verbose: bool):
         ctx.obj['config'] = Config()
 
     # Setup logging
-    log_level = 'DEBUG' if verbose else ctx.obj['config'].system.log_level
+    log_level = 'DEBUG' if (verbose or ctx.obj['config'].system.debug) else ctx.obj['config'].system.log_level
     setup_logging(
         log_file=ctx.obj['config'].system.log_file,
         log_level=log_level
@@ -304,8 +304,9 @@ def flight_upload(ctx, log_file: Path, service: tuple, dry_run: bool):
             uploader_config = cfg.flight_data.uploaders[service_name]
             UploaderClass = UPLOADERS[service_name]
 
-            # Add data_dir to config
+            # Add global settings to uploader config
             uploader_config['data_dir'] = cfg.system.data_dir
+            uploader_config['debug'] = cfg.system.debug
 
             uploader = UploaderClass(uploader_config)
 
@@ -574,6 +575,7 @@ def auto_process(ctx, path: Path, service: tuple, skip_uploads: bool):
 
                 uploader_config = cfg.flight_data.uploaders.get(service_name, {})
                 uploader_config['data_dir'] = cfg.system.data_dir
+                uploader_config['debug'] = cfg.system.debug
                 UploaderClass = UPLOADERS[service_name]
                 uploader = UploaderClass(uploader_config)
 

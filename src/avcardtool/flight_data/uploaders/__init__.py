@@ -4,12 +4,14 @@ from avcardtool.flight_data.uploaders.cloudahoy import CloudAhoyUploader
 from avcardtool.flight_data.uploaders.flysto import FlyStoUploader
 from avcardtool.flight_data.uploaders.savvy_aviation import SavvyAviationUploader
 from avcardtool.flight_data.uploaders.maintenance_tracker import MaintenanceTrackerUploader
+from avcardtool.flight_data.uploaders.mock import MockUploader
 
 __all__ = [
     'CloudAhoyUploader',
     'FlyStoUploader',
     'SavvyAviationUploader',
     'MaintenanceTrackerUploader',
+    'MockUploader',
 ]
 
 # Registry of all available uploaders
@@ -18,4 +20,5 @@ UPLOADERS = {
     'flysto': FlyStoUploader,
     'savvy_aviation': SavvyAviationUploader,
     'maintenance_tracker': MaintenanceTrackerUploader,
+    'mock': MockUploader,
 }

@@ -58,6 +58,7 @@ class FlightDataUploader(ABC):
         """
         self.config = config
         self.enabled = config.get('enabled', False)
+        self.debug = config.get('debug', False)
 
     @abstractmethod
     def authenticate(self) -> bool:

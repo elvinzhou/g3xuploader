@@ -103,17 +103,18 @@ class OOOIDetector:
                     logger.info(f"OFF detected at {timestamp}")
                 was_above_takeoff_speed = True
 
-            # ON: Landing
-            if was_above_takeoff_speed and ground_speed < self.config.landing_speed_kts:
-                if ground_speed > 0:  # Still moving (just landed, not stopped)
+            # ON: Landing (ground speed drops below landing threshold after being airborne)
+            if was_above_takeoff_speed and result.on_time is None:
+                if ground_speed < self.config.landing_speed_kts:
                     result.on_time = timestamp
                     logger.info(f"ON detected at {timestamp}")
                     was_above_takeoff_speed = False
 
             # IN: Engine stop (RPM drops below threshold)
-            if rpm < self.config.engine_stop_rpm and prev_rpm >= self.config.engine_stop_rpm:
-                result.in_time = timestamp
-                logger.info(f"IN detected at {timestamp}")
+            if result.out_time is not None and result.in_time is None:
+                if rpm < self.config.engine_stop_rpm and prev_rpm >= self.config.engine_stop_rpm:
+                    result.in_time = timestamp
+                    logger.info(f"IN detected at {timestamp}")
 
             # Update state
             prev_rpm = rpm

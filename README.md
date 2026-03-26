@@ -7,34 +7,35 @@ AVCardTool combines two essential capabilities for general aviation into one str
 1. **Flight Data Processing** - Automatically process flight logs, calculate Hobbs/Tach times, detect OOOI events, and upload to tracking services.
 2. **Navigation Database Management** - Download and install aviation databases (NavData, Terrain, Obstacles, Charts) to SD cards.
 
-Built for reliability on Raspberry Pi, AVCardTool is distributed as a standalone binary to eliminate "dependency mess" and ensure a solid "Go-like" deployment experience.
+Built for reliability on Raspberry Pi and other Linux systems, AVCardTool is designed to run as a background service triggered by SD card insertions.
 
 ## Features
 
-- **Standalone Binary**: No Python environment required on the target machine.
-- **Poetry-Backed**: Strictly locked dependencies for reproducible builds.
+- **Automated Workflow**: Insert an SD card, and it handles everything from log uploads to database updates.
+- **Poetry-Backed**: Strictly locked dependencies for reproducible environments.
 - **Robust Garmin SSO**: Direct integration with flyGarmin (Aviation flow) with MFA support.
 - **Automatic SD Card Detection**: Triggered by udev, processed by systemd.
-- **Professional Packaging**: Distributed as a `.deb` package for easy system integration.
+- **Manufacturer-Agnostic**: Modular design to support various avionics (Garmin G3X, etc.).
 
-## Installation (Raspberry Pi)
+## Installation (Recommended)
 
-The recommended way to install AVCardTool on Raspberry Pi OS (64-bit) is via the `.deb` package.
+The recommended way to install AVCardTool is using the provided installation script, which sets up a dedicated virtual environment and system integration.
 
 ### One-Line Install
 
 Copy and paste this command into your terminal:
 
 ```bash
-curl -sL $(curl -s https://api.github.com/repos/yourusername/g3xuploader/releases/latest | grep "browser_download_url.*arm64.deb" | cut -d '"' -f 4) -o avcardtool.deb && sudo apt install ./avcardtool.deb && rm avcardtool.deb
+curl -sSL https://raw.githubusercontent.com/yourusername/avcardtool/main/install.sh | sudo bash
 ```
 
 This command will:
-1. Download the latest `.deb` package from GitHub.
-2. Install the `avcardtool` binary to `/usr/local/bin/`.
-3. Set up the `udev` rules for SD card detection.
-4. Install the `systemd` service for background processing.
-5. Create the configuration directory at `/etc/avcardtool/`.
+1. Install system dependencies (`python3-venv`, `udev`).
+2. Create a virtual environment in `/opt/avcardtool/venv`.
+3. Install `avcardtool` and its dependencies.
+4. Set up `udev` rules for SD card detection.
+5. Install the `systemd` service for background processing.
+6. Create the configuration directory at `/etc/avcardtool/`.
 
 ## One-Time Setup
 

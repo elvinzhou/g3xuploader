@@ -11,27 +11,37 @@ This project merges two separate tools into one modular system:
 1. **Modular Architecture**: Separate concerns to allow independent development.
 2. **Manufacturer-Agnostic Flight Data**: Support multiple avionics manufacturers.
 3. **Upstream Contribution**: Keep Garmin navdata code separate for upstreaming.
-4. **Professional Deployment**: High-reliability standalone binaries for Raspberry Pi.
+4. **Reliable Deployment**: High-reliability isolated Python environments for Linux/Raspberry Pi.
 5. **Unified CLI**: Single command-line interface with subcommands.
 
 ## High-Reliability Deployment Strategy
 
-To address the common "dependency mess" and runtime instability of Python in headless environments (like a Raspberry Pi), AVCardTool employs a professional build strategy:
+To address the "dependency mess" and runtime instability of Python in headless environments (like a Raspberry Pi), AVCardTool employs a focused deployment strategy:
 
 ### 1. Dependency Locking (Poetry)
-The project uses **Poetry** to manage dependencies. This ensures that every build uses the exact same versions of all transitive dependencies, preventing breakage from upstream package updates.
+The project uses **Poetry** to manage dependencies. This ensures that every build uses the exact same versions of all transitive dependencies, preventing breakage from upstream package updates. The `poetry.lock` file is the source of truth for the environment.
 
-### 2. Standalone Binary Compilation (Nuitka)
-Instead of distributing source code, AVCardTool is compiled into a standalone machine-code binary using **Nuitka**.
+### 2. Isolated Virtual Environments
+The recommended installation method creates a dedicated, isolated virtual environment in `/opt/avcardtool/venv`.
+- **System Isolation**: It does not depend on system-level Python packages (except for the interpreter itself), avoiding "pip-hell" or conflicts with OS updates.
+- **Controlled Updates**: Updates are performed via the `install.sh` script which manages the environment lifecycle.
+- **Standard Tooling**: Uses standard `pip` and `venv` tools, making it easy to debug and inspect on the target machine.
+
+### 3. Professional System Integration
+Instead of simple scripts, AVCardTool integrates deeply with Linux system primitives:
+- **Udev**: Precise hardware event detection for SD cards.
+- **Systemd**: Managed execution with logging (`journald`), resource limits, and automatic retries.
+- **FHS Compliance**: Files are stored in standard locations (`/etc/avcardtool`, `/var/lib/avcardtool`, `/var/log/avcardtool`).
+
+## Advanced Distribution (Optional)
+
+### Standalone Binary Compilation (Nuitka)
+For environments where even a Python interpreter is undesirable, AVCardTool *can* be compiled into a standalone machine-code binary using **Nuitka**.
 - **Self-Contained**: The binary includes the Python interpreter and all libraries.
-- **High Performance**: Nuitka translates Python into optimized C++ before compilation.
-- **Zero-Dependency Target**: No `python3` or `pip` installation is required on the target Raspberry Pi.
+- **Performance**: Nuitka translates Python into optimized C++ before compilation.
+- **Zero-Dependency Target**: Useful for minimalist container images or legacy systems.
 
-### 3. Automated CI/CD (GitHub Actions)
-A GitHub Actions workflow (`release.yml`) automates the build process:
-- Uses **QEMU** to emulate ARM64 (aarch64) environments.
-- Compiles the binary on every release tag.
-- Packages the binary, `udev` rules, and `systemd` services into a **.deb** package.
+Note: This approach is currently secondary to the virtual environment method during active development to reduce build complexity.
 
 ## Project Structure
 
@@ -82,7 +92,8 @@ The `Config` module uses intelligent path resolution to locate `/etc/avcardtool/
 
 ## Benefits of This Architecture
 
-1. **Stability**: Standalone binaries cannot be broken by system-level Python updates.
-2. **Reproducibility**: Poetry ensures bit-for-bit identical builds.
-3. **Professionalism**: Distribution via `.deb` packages follows Linux standards.
-4. **Maintenance**: Modular design allows adding new avionics (Dynon/Aspen) by implementing a single interface.
+1. **Isolation**: Virtual environments prevent interference between AVCardTool and system Python packages.
+2. **Reproducibility**: Poetry ensures bit-for-bit identical environments via `poetry.lock`.
+3. **Familiarity**: Using standard Python tools makes it easier for contributors to develop and debug.
+4. **Professionalism**: Proper Linux integration (udev, systemd, FHS) ensures a robust, production-grade experience.
+5. **Flexibility**: Modular design allows adding new avionics (Dynon/Aspen) by implementing a single interface.

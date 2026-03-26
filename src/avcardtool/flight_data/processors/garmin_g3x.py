@@ -104,7 +104,7 @@ class GarminG3XProcessor(FlightDataProcessor):
 
     def extract_metadata(self, file_path: Path) -> FlightMetadata:
         """
-        Extract metadata from G3X log file header.
+        Extract metadata from G3X log file header and filename.
         """
         try:
             with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
@@ -118,16 +118,22 @@ class GarminG3XProcessor(FlightDataProcessor):
             date = None
             departure_airport = None
             
+            # Try to extract date and departure from filename
+            # Format: log_YYYYMMDD_HHMMSS_ID_DEPT.csv
             filename = file_path.name
             if filename.startswith('log_'):
                 parts = filename.replace('.csv', '').split('_')
-                if len(parts) >= 4:
+                if len(parts) >= 2:
                     date_str = parts[1]
-                    if len(date_str) == 8:
+                    if len(date_str) == 8 and date_str.isdigit():
                         date = f"{date_str[0:4]}-{date_str[4:6]}-{date_str[6:8]}"
-                    if len(parts) == 4:
-                        departure_airport = parts[3]
+                
+                # Some files have DEPT at the end
+                if len(parts) >= 4:
+                    departure_airport = parts[-1]
 
+            # If date extraction from filename failed, we'll try to get it from the first data line later
+            # For now, return what we have
             return FlightMetadata(
                 aircraft_ident=metadata_dict.get('aircraft_ident'),
                 date=date,
@@ -141,7 +147,13 @@ class GarminG3XProcessor(FlightDataProcessor):
             )
 
         except Exception as e:
-            raise ValueError(f"Error extracting metadata from {file_path}: {e}")
+            logger.error(f"Error extracting metadata from {file_path}: {e}")
+            # Return minimal metadata if parsing fails
+            return FlightMetadata(
+                aircraft_ident="UNKNOWN",
+                manufacturer="Garmin",
+                model="G3X Touch"
+            )
 
     def _parse_metadata_line(self, line: str) -> dict:
         metadata = {}
@@ -171,25 +183,29 @@ class GarminG3XProcessor(FlightDataProcessor):
     def _parse_data_points(self, file_path: Path) -> List[DataPoint]:
         data_points = []
         with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-            lines = f.readlines()
+            # Skip metadata line (Line 1)
+            f.readline()
+            
+            # Line 2: Headers
+            header_line = f.readline()
+            if not header_line:
+                return data_points
+            self._map_columns(header_line)
+            
+            # Line 3: Short headers (skip)
+            f.readline()
 
-        if len(lines) < 4:
-            return data_points
-
-        # Line 2 (index 1) contains the full headers
-        self._map_columns(lines[1])
-
-        # Data starts at line 4 (index 3)
-        for line_num, line in enumerate(lines[3:], start=4):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                data_point = self._parse_data_line(line)
-                if data_point:
-                    data_points.append(data_point)
-            except Exception:
-                continue
+            # Data starts at line 4
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    data_point = self._parse_data_line(line)
+                    if data_point:
+                        data_points.append(data_point)
+                except Exception:
+                    continue
 
         return data_points
 

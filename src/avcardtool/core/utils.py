@@ -20,18 +20,44 @@ def setup_logging(log_file: Optional[str] = None, log_level: str = "INFO") -> No
     """
     level = getattr(logging, log_level.upper(), logging.INFO)
 
-    handlers = [logging.StreamHandler(sys.stdout)]
+    # Root logger configuration
+    root_logger = logging.getLogger()
+    root_logger.setLevel(level)
 
-    if log_file:
-        log_path = Path(log_file)
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        handlers.append(logging.FileHandler(log_file))
+    # Remove existing handlers
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
 
-    logging.basicConfig(
-        level=level,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers=handlers
+    # Create formatters
+    # Detailed format for files, slightly cleaner for console
+    file_formatter = logging.Formatter(
+        '%(asctime)s [%(levelname)s] %(name)s (%(filename)s:%(lineno)d): %(message)s'
     )
+    console_formatter = logging.Formatter(
+        '%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+        datefmt='%H:%M:%S'
+    )
+
+    # Console handler
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(console_formatter)
+    root_logger.addHandler(console_handler)
+
+    # File handler
+    if log_file:
+        try:
+            log_path = Path(log_file)
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            file_handler = logging.FileHandler(log_file)
+            file_handler.setFormatter(file_formatter)
+            root_logger.addHandler(file_handler)
+            
+            logging.info(f"Logging initialized. Level: {log_level}, File: {log_file}")
+        except Exception as e:
+            logging.error(f"Failed to initialize file logging at {log_file}: {e}")
+    else:
+        logging.info(f"Logging initialized. Level: {log_level}, Console only.")
 
 
 def hash_file(file_path: Path, algorithm: str = "sha256") -> str:
