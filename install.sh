@@ -54,18 +54,16 @@ if [ -x "$SYMLINK" ]; then
         echo "Existing installation found: v${CURRENT_VERSION}"
         echo "This will upgrade to:        v${INSTALL_VERSION}"
         echo ""
-        read -r -p "Continue? [y/N] " confirm
+        read -r -p "Continue? [Y/n] " confirm < /dev/tty
         case "$confirm" in
-            [yY][eE][sS]|[yY]) ;;
-            *) echo "Aborted."; exit 0 ;;
+            [nN][oO]|[nN]) echo "Aborted."; exit 0 ;;
         esac
         echo ""
     elif [ "$CURRENT_VERSION" = "$INSTALL_VERSION" ]; then
         echo "v${INSTALL_VERSION} is already installed."
-        read -r -p "Reinstall? [y/N] " confirm
+        read -r -p "Reinstall? [Y/n] " confirm < /dev/tty
         case "$confirm" in
-            [yY][eE][sS]|[yY]) ;;
-            *) echo "Nothing to do."; exit 0 ;;
+            [nN][oO]|[nN]) echo "Nothing to do."; exit 0 ;;
         esac
         echo ""
     fi
