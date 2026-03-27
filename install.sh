@@ -12,7 +12,7 @@
 
 set -e
 
-INSTALL_VERSION="1.3.1"
+INSTALL_VERSION="1.3.2"
 VENV_DIR="/opt/avcardtool/venv"
 SYMLINK="/usr/local/bin/avcardtool"
 
@@ -111,9 +111,23 @@ ln -sf "$VENV_DIR/bin/avcardtool" "$SYMLINK"
 echo "Done ($(sudo -u "$REAL_USER" "$SYMLINK" --version 2>/dev/null || echo 'unknown version'))"
 
 # ---------------------------------------------------------------------------
-# Step 3: User-space config and data directories
+# Step 3: Clean up legacy system paths before config generation
 # ---------------------------------------------------------------------------
-echo "[3/6] Creating user directories..."
+echo "[3/6] Cleaning up legacy system paths..."
+
+for OLD_PATH in /var/lib/avcardtool /etc/avcardtool; do
+    if [ -d "$OLD_PATH" ]; then
+        echo "  Removing $OLD_PATH"
+        rm -rf "$OLD_PATH"
+    fi
+done
+
+echo "Done"
+
+# ---------------------------------------------------------------------------
+# Step 4: User-space config and data directories
+# ---------------------------------------------------------------------------
+echo "[4/6] Creating user directories..."
 
 sudo -u "$REAL_USER" mkdir -p "$CONFIG_DIR"
 sudo -u "$REAL_USER" mkdir -p "$DATA_DIR"
@@ -138,9 +152,9 @@ done
 echo "Done"
 
 # ---------------------------------------------------------------------------
-# Step 4: udev rules  (requires root — stays system-level)
+# Step 5: udev rules  (requires root — stays system-level)
 # ---------------------------------------------------------------------------
-echo "[4/6] Installing udev rules..."
+echo "[5/6] Installing udev rules..."
 
 UDEV_RULE_PATH="/etc/udev/rules.d/99-avcardtool-sdcard.rules"
 
@@ -166,9 +180,9 @@ udevadm trigger
 echo "Done"
 
 # ---------------------------------------------------------------------------
-# Step 5: systemd service  (requires root — stays system-level)
+# Step 6: systemd service  (requires root — stays system-level)
 # ---------------------------------------------------------------------------
-echo "[5/6] Installing systemd service..."
+echo "[6/6] Installing systemd service..."
 
 SERVICE_SRC="systemd/avcardtool-processor@.service"
 SERVICE_DEST="/lib/systemd/system/avcardtool-processor@.service"
@@ -202,20 +216,6 @@ rm -f /lib/systemd/system/g3x-processor@.service
 rm -f /lib/systemd/system/g3x-db-updater@.service
 
 systemctl daemon-reload
-
-echo "Done"
-
-# ---------------------------------------------------------------------------
-# Step 6: Clean up legacy system paths (no longer used)
-# ---------------------------------------------------------------------------
-echo "[6/6] Cleaning up legacy system paths..."
-
-for OLD_PATH in /var/lib/avcardtool /etc/avcardtool; do
-    if [ -d "$OLD_PATH" ]; then
-        echo "  Removing $OLD_PATH (data now lives in $DATA_DIR)"
-        rm -rf "$OLD_PATH"
-    fi
-done
 
 echo "Done"
 
