@@ -100,7 +100,7 @@ AVCardTool uses **Poetry** for dependency management and **Nuitka** for standalo
 ### Setup
 
 ```bash
-git clone https://github.com/yourusername/avcardtool.git
+git clone https://github.com/elvinzhou/g3xuploader.git
 cd avcardtool
 poetry install
 ```

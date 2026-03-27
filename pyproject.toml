@@ -51,10 +51,10 @@ nuitka = "^4.0.7"
 avcardtool = "avcardtool.cli:main"
 
 [tool.poetry.urls]
-Homepage = "https://github.com/yourusername/avcardtool"
-Repository = "https://github.com/yourusername/avcardtool.git"
-Issues = "https://github.com/yourusername/avcardtool/issues"
-Documentation = "https://github.com/yourusername/avcardtool/blob/main/README.md"
+Homepage = "https://github.com/elvinzhou/g3xuploader"
+Repository = "https://github.com/elvinzhou/g3xuploader.git"
+Issues = "https://github.com/elvinzhou/g3xuploader/issues"
+Documentation = "https://github.com/elvinzhou/g3xuploader/blob/main/README.md"
 
 [tool.black]
 line-length = 100

@@ -64,7 +64,7 @@ if [ -f "pyproject.toml" ]; then
     /opt/avcardtool/venv/bin/pip install -e .
 else
     echo "No local source found, installing directly from GitHub..."
-    /opt/avcardtool/venv/bin/pip install "git+https://github.com/yourusername/avcardtool.git"
+    /opt/avcardtool/venv/bin/pip install "git+https://github.com/elvinzhou/g3xuploader.git"
 fi
 
 # Create symlink for easy access
