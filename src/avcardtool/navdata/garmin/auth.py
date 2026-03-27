@@ -44,19 +44,19 @@ FLYGARMIN_API = f"{FLYGARMIN_BASE}/fly-garmin/api"
 # Token storage
 TOKEN_FILE = "garmin_tokens.json"
 
-# SSO signin parameters (required by Garmin SSO)
+# SSO signin parameters — matched to FLY_GARMIN_DESKTOP client (from jdmtool)
+# service/source/gauthHost point to FLYGARMIN_BASE for headless redirect (vs
+# localhost in jdmtool's browser flow).
 _SSO_PARAMS = {
-    "webhost": FLYGARMIN_BASE,
     "service": FLYGARMIN_BASE,
-    "source": GARMIN_SSO_SIGNIN,
-    "redirectAfterAccountLoginUrl": FLYGARMIN_BASE,
-    "redirectAfterAccountCreationUrl": FLYGARMIN_BASE,
-    "gauthHost": GARMIN_SSO_BASE,
+    "source": FLYGARMIN_BASE,
+    "gauthHost": FLYGARMIN_BASE,
     "locale": "en_US",
     "id": "gauth-widget",
-    "cssUrl": "https://static.garmincdn.com/com.garmin.connect/ui/css/gauth-custom-v1.2-min.css",
-    "clientId": "FlyGarmin",
-    "rememberMeShown": "true",
+    "cssUrl": "https://static.garmin.com/apps/fly/files/desktop/flygarmin-desktop-gauth-v3.css",
+    "reauth": "false",
+    "clientId": "FLY_GARMIN_DESKTOP",
+    "rememberMeShown": "false",
     "rememberMeChecked": "false",
     "createAccountShown": "true",
     "openCreateAccount": "false",
@@ -64,13 +64,25 @@ _SSO_PARAMS = {
     "consumeServiceTicket": "false",
     "initialFocus": "true",
     "embedWidget": "false",
-    "generateExtraServiceTicket": "true",
-    "generateTwoExtraServiceTickets": "true",
+    "socialEnabled": "false",
+    "generateExtraServiceTicket": "false",
+    "generateTwoExtraServiceTickets": "false",
     "generateNoServiceTicket": "false",
-    "globalOptInShown": "true",
+    "globalOptInShown": "false",
     "globalOptInChecked": "false",
     "mobile": "false",
-    "connectLegalTerms": "true",
+    "connectLegalTerms": "false",
+    "showTermsOfUse": "false",
+    "showPrivacyPolicy": "false",
+    "showConnectLegalAge": "false",
+    "locationPromptShown": "false",
+    "showPassword": "true",
+    "useCustomHeader": "false",
+    "mfaRequired": "false",
+    "performMFACheck": "false",
+    "permanentMFA": "false",
+    "rememberMyBrowserShown": "false",
+    "rememberMyBrowserChecked": "false",
 }
 
 
@@ -273,6 +285,16 @@ class GarminAuth:
                 timeout=30,
             )
 
+            if response.status_code == 429:
+                raise GarminAuthError(
+                    "Garmin is rate-limiting logins from your IP (HTTP 429). "
+                    "Wait a few minutes and try again."
+                )
+            if response.status_code >= 400:
+                raise GarminAuthError(
+                    f"Garmin SSO returned HTTP {response.status_code}"
+                )
+
             if "AUTHENTICATION" in response.text and "FAILED" in response.text:
                 raise GarminAuthError("Invalid email or password")
 
@@ -325,13 +347,6 @@ class GarminAuth:
 
         except GarminAuthError:
             raise
-        except requests.HTTPError as e:
-            status = e.response.status_code if e.response is not None else "?"
-            if status == 429:
-                raise GarminAuthError(
-                    "Rate limited by Garmin (429). Wait a few minutes and try again."
-                )
-            raise GarminAuthError(f"HTTP error during login: {e}")
         except requests.RequestException as e:
             raise GarminAuthError(f"Network error during login: {e}")
         except Exception as e:
