@@ -720,31 +720,199 @@ def navdata_login(ctx, email: str, password: Optional[str], force: bool):
 
 
 @navdata.command('list-databases')
-@click.option('--device', '-d', type=int, help='Device index')
 @click.pass_context
-def navdata_list_databases(ctx, device: Optional[int]):
-    """List available databases for download."""
-    click.echo("Available databases will be listed here...")
+def navdata_list_databases(ctx):
+    """List aircraft, devices, and available database subscriptions."""
+    from avcardtool.navdata.garmin.auth import GarminAuth, GarminAPIError
+    from avcardtool.navdata.garmin.api import FlyGarminAPI
+
+    cfg = ctx.obj['config']
+    auth = GarminAuth(token_dir=Path(cfg.system.data_dir))
+
+    if not auth.is_authenticated():
+        click.echo("Not logged in. Run 'avcardtool navdata login' first.", err=True)
+        sys.exit(1)
+
+    try:
+        api = FlyGarminAPI(auth)
+        aircraft_list = api.list_aircraft()
+
+        if not aircraft_list:
+            click.echo("No aircraft found on this account.")
+            return
+
+        for ai, ac in enumerate(aircraft_list):
+            click.echo(f"\n[{ai}] {ac.tail_number}  ({ac.avdb_status})")
+            for di, dev in enumerate(ac.devices):
+                click.echo(f"     Device [{di}]: {dev.name}  serial={dev.display_serial}  ({dev.avdb_status})")
+                for avdb in dev.avdb_types:
+                    if not avdb.series:
+                        continue
+                    for s in avdb.series:
+                        installable = s.installable_issues
+                        latest = installable[0] if installable else (s.available_issues[0] if s.available_issues else None)
+                        installed = f"  installed={avdb.installed_issue_name}" if avdb.installed_issue_name else ""
+                        can_install = f"  → can install: {latest.name} ({latest.effective_at[:10]}–{(latest.invalid_at or 'no expiry')[:10]})" if latest else "  (no installable issues)"
+                        click.echo(f"       {avdb.name} [{avdb.status}]  series={s.series_id}  {s.region_name}{installed}{can_install}")
+
+    except GarminAPIError as e:
+        click.echo(f"API error: {e}", err=True)
+        sys.exit(1)
+    except Exception as e:
+        click.echo(f"Unexpected error: {e}", err=True)
+        sys.exit(1)
 
 
 @navdata.command('download')
-@click.argument('selection', required=False, default='all')
-@click.option('--device', '-d', type=int, help='Device index')
+@click.option('--aircraft', '-a', type=int, default=0, show_default=True,
+              help='Aircraft index from list-databases')
+@click.option('--device', '-d', type=int, default=None,
+              help='Device index within aircraft (default: all devices)')
+@click.option('--series', '-s', type=int, default=None,
+              help='Series ID to download (default: all installable series)')
+@click.option('--issue', '-i', default=None,
+              help='Specific issue/cycle name (default: latest installable)')
+@click.option('--card-serial', default=None,
+              help='SD card volume serial for unlock (default: auto-detect)')
 @click.option(
     '--output', '-o',
     type=click.Path(path_type=Path),
-    help='Output directory'
+    default=None,
+    help='Output directory (default: data_dir/navdata/)'
 )
 @click.pass_context
-def navdata_download(ctx, selection: str, device: Optional[int], output: Optional[Path]):
-    """
-    Download navigation databases.
+def navdata_download(ctx, aircraft: int, device: Optional[int], series: Optional[int],
+                     issue: Optional[str], card_serial: Optional[str], output: Optional[Path]):
+    """Download navigation databases from flyGarmin."""
+    from avcardtool.navdata.garmin.auth import GarminAuth, GarminAPIError
+    from avcardtool.navdata.garmin.api import FlyGarminAPI
 
-    SELECTION can be 'all', or comma-separated indices (e.g., '0,1,2').
-    """
-    click.echo(f"Would download: {selection}")
-    if output:
-        click.echo(f"To directory: {output}")
+    cfg = ctx.obj['config']
+    auth = GarminAuth(token_dir=Path(cfg.system.data_dir))
+
+    if not auth.is_authenticated():
+        click.echo("Not logged in. Run 'avcardtool navdata login' first.", err=True)
+        sys.exit(1)
+
+    output_dir = output or (Path(cfg.system.data_dir) / "navdata")
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Auto-detect SD card serial
+    if card_serial is None:
+        try:
+            from avcardtool.navdata.sdcard import SDCardDetector
+            cards = SDCardDetector().scan_for_cards()
+            if cards:
+                card_serial = cards[0].volume_id
+                click.echo(f"SD card serial: {card_serial}")
+        except Exception:
+            pass
+    if not card_serial:
+        card_serial = "0"
+
+    try:
+        from avcardtool.navdata.garmin.api import BatchDatabase
+        api = FlyGarminAPI(auth)
+        aircraft_list = api.list_aircraft()
+
+        if not aircraft_list:
+            click.echo("No aircraft found on this account.", err=True)
+            sys.exit(1)
+
+        if aircraft >= len(aircraft_list):
+            click.echo(f"Aircraft index {aircraft} out of range (0–{len(aircraft_list)-1}).", err=True)
+            sys.exit(1)
+
+        ac = aircraft_list[aircraft]
+        click.echo(f"Aircraft: {ac.tail_number}")
+
+        devices = [ac.devices[device]] if device is not None else ac.devices
+
+        # ---------------------------------------------------------------
+        # Step 1: collect all (device, avdb, series, issue) tuples to download
+        # ---------------------------------------------------------------
+        plan = []  # list of (dev, avdb, series_obj, issue_obj)
+        for dev in devices:
+            for avdb in dev.avdb_types:
+                for s in avdb.series:
+                    if series is not None and s.series_id != series:
+                        continue
+                    candidates = s.installable_issues or s.available_issues
+                    if not candidates:
+                        continue
+                    if issue:
+                        target = next((i for i in candidates if i.name == issue), None)
+                        if not target:
+                            continue
+                    else:
+                        target = candidates[0]
+                    plan.append((dev, avdb, s, target))
+
+        if not plan:
+            click.echo("No installable database issues found.")
+            return
+
+        # ---------------------------------------------------------------
+        # Step 2: create a batch-update session (mirrors Garmin's own client)
+        # ---------------------------------------------------------------
+        batch_dbs = []
+        for dev, avdb, s, target in plan:
+            batch_dbs.append(BatchDatabase(
+                series_id=s.series_id,
+                issue_name=target.name,
+                device_ids=[dev.device_id],
+            ))
+
+        click.echo(f"\nCreating batch-update session for {len(batch_dbs)} database(s)...")
+        try:
+            batch_id = api.create_batch_update(batch_dbs)
+            click.echo(f"Batch ID: {batch_id}")
+        except Exception as e:
+            click.echo(f"Warning: could not create batch session ({e}). Falling back to direct unlock.")
+            batch_id = None
+
+        # ---------------------------------------------------------------
+        # Step 3: for each entry unlock and download
+        # ---------------------------------------------------------------
+        downloaded = []
+        for dev, avdb, s, target in plan:
+            expiry = (target.invalid_at or "no expiry")[:10]
+            click.echo(f"\n  {avdb.name}  device={dev.name}  series={s.series_id}  issue={target.name} (expires {expiry})")
+
+            # Unlock with BatchUpdate auth if we have a session
+            try:
+                api.unlock(s.series_id, target.name, dev.device_id, card_serial, batch_id=batch_id)
+                click.echo("    Unlocked.")
+            except Exception as e:
+                click.echo(f"    Warning: unlock failed ({e}) — attempting download anyway.")
+
+            # Fetch file list
+            issue_files = api.list_files(s.series_id, target.name)
+            all_files = issue_files.main_files + issue_files.auxiliary_files
+            if not all_files:
+                click.echo("    No files found for this issue.")
+                continue
+
+            series_dir = output_dir / avdb.name.replace(" ", "_") / target.name
+            for db_file in all_files:
+                def _progress(done: int, total: int, name: str = db_file.file_name) -> None:
+                    pct = int(done / total * 100) if total else 0
+                    click.echo(f"\r    {name}: {pct}%  ", nl=False)
+
+                dest = api.download_file(db_file, series_dir, progress_callback=_progress)
+                click.echo(f"\r    {db_file.file_name}: done ({db_file.file_size:,} bytes)  ")
+                downloaded.append(dest)
+
+        click.echo(f"\nDownloaded {len(downloaded)} file(s) to {output_dir}")
+        if downloaded:
+            click.echo("Run 'avcardtool navdata install' to write to your SD card.")
+
+    except GarminAPIError as e:
+        click.echo(f"API error: {e}", err=True)
+        sys.exit(1)
+    except Exception as e:
+        click.echo(f"Unexpected error: {e}", err=True)
+        sys.exit(1)
 
 
 @navdata.command('install')

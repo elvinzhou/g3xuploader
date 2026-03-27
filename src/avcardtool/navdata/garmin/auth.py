@@ -22,7 +22,7 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Dict, Any, List, Callable
+from typing import Optional, Dict, Any, List, Callable, Tuple
 from urllib.parse import urlparse, parse_qs
 
 import requests
@@ -63,7 +63,7 @@ _SSO_PARAMS = {
     "displayNameShown": "false",
     "consumeServiceTicket": "false",
     "initialFocus": "true",
-    "embedWidget": "false",
+    "embedWidget": "true",
     "socialEnabled": "false",
     "generateExtraServiceTicket": "false",
     "generateTwoExtraServiceTickets": "false",
@@ -226,27 +226,49 @@ class GarminAuth:
                 return match.group(1)
         return None
 
-    def _extract_ticket(self, response: requests.Response) -> Optional[str]:
-        """Extract the service ticket from a response or its redirect chain."""
-        # Check redirect history
+    def _extract_ticket(self, response: requests.Response) -> Optional[Tuple[str, str]]:
+        """
+        Extract (service_ticket, service_url) from a response.
+
+        Garmin's embedWidget=true success page embeds the ticket in JS variables:
+            var response_url = "https:\\/\\/fly.garmin.com?ticket=ST-...";
+            var service_url  = "https:\\/\\/fly.garmin.com";
+
+        Falls back to checking redirects and query params.
+        Returns (ticket, service_url) or None.
+        """
+        # Primary: parse JS variables from Garmin's casEmbedSuccess.html
+        response_url_match = re.search(
+            r'var\s+response_url\s*=\s*"([^"]+)"', response.text
+        )
+        service_url_match = re.search(
+            r'var\s+service_url\s*=\s*"([^"]+)"', response.text
+        )
+        if response_url_match:
+            response_url = response_url_match.group(1).replace(r'\/', '/')
+            service_url = (
+                service_url_match.group(1).replace(r'\/', '/')
+                if service_url_match
+                else FLYGARMIN_BASE
+            )
+            qs = parse_qs(urlparse(response_url).query)
+            if 'ticket' in qs:
+                ticket = qs['ticket'][0]
+                logger.debug(f"Ticket extracted from JS response_url (service_url={service_url})")
+                return ticket, service_url
+
+        # Fallback: redirect chain and final URL
         for r in response.history:
             location = r.headers.get('Location', '')
             if 'ticket=' in location:
-                params = parse_qs(urlparse(location).query)
-                if 'ticket' in params:
-                    return params['ticket'][0]
+                qs = parse_qs(urlparse(location).query)
+                if 'ticket' in qs:
+                    return qs['ticket'][0], FLYGARMIN_BASE
 
-        # Check final URL
         if 'ticket=' in response.url:
-            params = parse_qs(urlparse(response.url).query)
-            if 'ticket' in params:
-                return params['ticket'][0]
-
-        # Check body
-        for pattern in [r'ticket=([A-Za-z0-9\-_]+)', r'"ticket":\s*"([^"]+)"']:
-            match = re.search(pattern, response.text)
-            if match:
-                return match.group(1)
+            qs = parse_qs(urlparse(response.url).query)
+            if 'ticket' in qs:
+                return qs['ticket'][0], FLYGARMIN_BASE
 
         return None
 
@@ -290,7 +312,10 @@ class GarminAuth:
                 GARMIN_SSO_SIGNIN,
                 params=_SSO_PARAMS,
                 data=login_data,
-                headers={"Referer": response.url},
+                headers={
+                    "Referer": response.url,
+                    "Origin": "https://sso.garmin.com",
+                },
                 timeout=30,
             )
 
@@ -307,7 +332,14 @@ class GarminAuth:
             if "AUTHENTICATION" in response.text and "FAILED" in response.text:
                 raise GarminAuthError("Invalid email or password")
 
-            if "MFA" in response.text or "verification" in response.text.lower():
+            # Garmin MFA challenge pages contain a one-time code input field
+            mfa_required = (
+                'name="mfa"' in response.text
+                or 'id="mfa"' in response.text
+                or '"MFACode"' in response.text
+                or 'one-time' in response.text.lower()
+            )
+            if mfa_required:
                 if not mfa_callback:
                     raise GarminAuthError(
                         "Multi-factor authentication required. "
@@ -325,9 +357,10 @@ class GarminAuth:
                     timeout=30,
                 )
 
-            ticket = self._extract_ticket(response)
-            if not ticket:
+            result = self._extract_ticket(response)
+            if not result:
                 raise GarminAuthError("Login failed — could not obtain service ticket")
+            ticket, service_url = result
 
             # Step 3: Exchange service ticket for OAuth Bearer token
             token_response = requests.post(
@@ -335,7 +368,7 @@ class GarminAuth:
                 data={
                     "grant_type": "service_ticket",
                     "client_id": GARMIN_OAUTH_CLIENT_ID,
-                    "service_url": FLYGARMIN_BASE,
+                    "service_url": service_url,
                     "service_ticket": ticket,
                 },
                 timeout=30,
