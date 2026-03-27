@@ -50,7 +50,7 @@ TOKEN_FILE = "garmin_tokens.json"
 _SSO_PARAMS = {
     "service": FLYGARMIN_BASE,
     "source": FLYGARMIN_BASE,
-    "gauthHost": FLYGARMIN_BASE,
+    "gauthHost": GARMIN_SSO_BASE,
     "locale": "en_US",
     "id": "gauth-widget",
     "cssUrl": "https://static.garmin.com/apps/fly/files/desktop/flygarmin-desktop-gauth-v3.css",
@@ -265,9 +265,15 @@ class GarminAuth:
         """
         try:
             # Step 1: GET SSO signin page → CSRF token
-            response = self.session.get(GARMIN_SSO_SIGNIN, params=_SSO_PARAMS, timeout=30)
+            response = self.session.get(
+                GARMIN_SSO_SIGNIN,
+                params=_SSO_PARAMS,
+                headers={"Referer": FLYGARMIN_BASE},
+                timeout=30,
+            )
             response.raise_for_status()
             csrf_token = self._get_csrf_token(response.text)
+            logger.debug(f"CSRF token found: {bool(csrf_token)}")
 
             # Step 2: POST credentials → service ticket
             login_data: Dict[str, str] = {
@@ -277,11 +283,14 @@ class GarminAuth:
             }
             if csrf_token:
                 login_data["_csrf"] = csrf_token
+            else:
+                logger.warning("No CSRF token found in login page — POST may be rejected")
 
             response = self.session.post(
                 GARMIN_SSO_SIGNIN,
                 params=_SSO_PARAMS,
                 data=login_data,
+                headers={"Referer": response.url},
                 timeout=30,
             )
 
