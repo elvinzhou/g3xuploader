@@ -334,8 +334,12 @@ class Config:
         Returns:
             Config instance with defaults
         """
-        config = cls()
-        
+        config = cls.__new__(cls)
+        config.config_path = path
+        config.flight_data = FlightDataConfig()
+        config.navdata = NavdataConfig()
+        config.system = SystemConfig()  # always fresh defaults, never inherits a stale config
+
         # Enable debug by default for initial setup/debugging
         config.system.debug = True
 

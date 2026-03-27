@@ -138,6 +138,12 @@ if [ ! -f "$CONFIG_FILE" ]; then
     echo "Default config created: $CONFIG_FILE"
 else
     echo "Config already exists: $CONFIG_FILE"
+    # Patch stale /var/log path from old installs
+    if grep -q '"/var/log/' "$CONFIG_FILE" 2>/dev/null; then
+        NEW_LOG_PATH="${DATA_DIR}/avcardtool.log"
+        sed -i "s|\"log_file\": \"/var/log/[^\"]*\"|\"log_file\": \"${NEW_LOG_PATH}\"|" "$CONFIG_FILE"
+        echo "  Patched stale log_file path -> $NEW_LOG_PATH"
+    fi
 fi
 
 # Migrate legacy configs if present

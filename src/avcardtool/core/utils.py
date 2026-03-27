@@ -55,7 +55,7 @@ def setup_logging(log_file: Optional[str] = None, log_level: str = "INFO") -> No
 
             logging.info(f"Logging initialized. Level: {log_level}, File: {log_path}")
         except Exception as e:
-            logging.error(f"Failed to initialize file logging at {log_file}: {e}")
+            logging.debug(f"Could not initialize file logging at {log_file}: {e}. Falling back to console only.")
     else:
         logging.info(f"Logging initialized. Level: {log_level}, Console only.")
 
