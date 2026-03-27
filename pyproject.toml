@@ -77,6 +77,28 @@ python_files = ["test_*.py"]
 python_functions = ["test_*"]
 addopts = "-v --cov=avcardtool --cov-report=term-missing"
 
+[tool.bumpversion]
+current_version = "1.2.0"
+commit = true
+tag = true
+tag_name = "v{new_version}"
+message = "Bump version: {current_version} → {new_version}"
+
+[[tool.bumpversion.files]]
+filename = "pyproject.toml"
+search = 'version = "{current_version}"'
+replace = 'version = "{new_version}"'
+
+[[tool.bumpversion.files]]
+filename = "src/avcardtool/__init__.py"
+search = '__version__ = "{current_version}"'
+replace = '__version__ = "{new_version}"'
+
+[[tool.bumpversion.files]]
+filename = "install.sh"
+search = 'INSTALL_VERSION="{current_version}"'
+replace = 'INSTALL_VERSION="{new_version}"'
+
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
