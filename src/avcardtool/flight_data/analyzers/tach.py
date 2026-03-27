@@ -64,10 +64,11 @@ class TachCalculator:
 
         else:  # variable mode
             # Variable mode: time accrues at (RPM / reference_rpm) rate
+            reference_rpm = self.config.reference_rpm or 1
             for data_point in flight_data.data_points:
                 rpm = data_point.rpm or 0
                 if rpm >= self.config.minimum_recording_rpm:
-                    rate = rpm / self.config.reference_rpm
+                    rate = rpm / reference_rpm
                     recording_seconds += rate
 
         increment_hours = recording_seconds / 3600.0

@@ -204,7 +204,8 @@ class GarminG3XProcessor(FlightDataProcessor):
                     data_point = self._parse_data_line(line)
                     if data_point:
                         data_points.append(data_point)
-                except Exception:
+                except Exception as e:
+                    logger.debug(f"Skipping malformed CSV line: {e}")
                     continue
 
         return data_points

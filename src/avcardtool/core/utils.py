@@ -46,14 +46,14 @@ def setup_logging(log_file: Optional[str] = None, log_level: str = "INFO") -> No
     # File handler
     if log_file:
         try:
-            log_path = Path(log_file)
+            log_path = Path(log_file).expanduser()
             log_path.parent.mkdir(parents=True, exist_ok=True)
-            
-            file_handler = logging.FileHandler(log_file)
+
+            file_handler = logging.FileHandler(log_path)
             file_handler.setFormatter(file_formatter)
             root_logger.addHandler(file_handler)
-            
-            logging.info(f"Logging initialized. Level: {log_level}, File: {log_file}")
+
+            logging.info(f"Logging initialized. Level: {log_level}, File: {log_path}")
         except Exception as e:
             logging.error(f"Failed to initialize file logging at {log_file}: {e}")
     else:

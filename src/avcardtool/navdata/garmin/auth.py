@@ -19,7 +19,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Tuple, List
 from urllib.parse import urlencode, urlparse, parse_qs
 
 import requests
@@ -417,7 +417,7 @@ class FlyGarminAPI:
         
         return response
     
-    def get_devices(self) -> list[GarminDevice]:
+    def get_devices(self) -> List[GarminDevice]:
         """
         Get list of registered Garmin devices.
         
@@ -454,7 +454,7 @@ class FlyGarminAPI:
         except requests.RequestException as e:
             raise GarminAPIError(f"Failed to get devices: {e}")
     
-    def get_available_databases(self, device: GarminDevice) -> list[DatabaseInfo]:
+    def get_available_databases(self, device: GarminDevice) -> List[DatabaseInfo]:
         """
         Get list of available databases for a device.
         

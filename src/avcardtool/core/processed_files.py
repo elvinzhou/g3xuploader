@@ -41,7 +41,7 @@ class ProcessedFilesDatabase:
     def _load(self) -> Dict[str, Any]:
         """Load database from disk."""
         try:
-            with open(self.db_path, 'r') as f:
+            with open(self.db_path, 'r', encoding='utf-8') as f:
                 return json.load(f)
         except (json.JSONDecodeError, FileNotFoundError) as e:
             logger.warning(f"Could not load processed files database: {e}")
@@ -50,7 +50,7 @@ class ProcessedFilesDatabase:
     def _save(self, data: Dict[str, Any]):
         """Save database to disk."""
         try:
-            with open(self.db_path, 'w') as f:
+            with open(self.db_path, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2)
         except Exception as e:
             logger.error(f"Could not save processed files database: {e}")

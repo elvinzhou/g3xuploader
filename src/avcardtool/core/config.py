@@ -90,8 +90,8 @@ class NavdataConfig:
 @dataclass
 class SystemConfig:
     """System-level configuration"""
-    data_dir: str = "/var/lib/avcardtool"
-    log_file: str = "/var/log/avcardtool.log"
+    data_dir: str = str(Path.home() / ".local" / "share" / "avcardtool")
+    log_file: str = str(Path.home() / ".local" / "share" / "avcardtool" / "avcardtool.log")
     log_level: str = "INFO"
     debug: bool = False
 
@@ -274,8 +274,8 @@ class Config:
                 "garmin": {}
             },
             "system": {
-                "data_dir": "/var/lib/avcardtool",
-                "log_file": "/var/log/avcardtool.log",
+                "data_dir": str(Path.home() / ".local" / "share" / "avcardtool"),
+                "log_file": str(Path.home() / ".local" / "share" / "avcardtool" / "avcardtool.log"),
                 "log_level": "INFO"
             }
         }

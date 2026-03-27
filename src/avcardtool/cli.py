@@ -370,7 +370,8 @@ def flight_list_uploaders(ctx):
 
         uploader = UploaderClass({})
         click.echo(f"  • {service_name} ({status})")
-        click.echo(f"    {UploaderClass.__doc__.strip().split(chr(10))[0]}")
+        doc = (UploaderClass.__doc__ or "").strip().split(chr(10))[0]
+        click.echo(f"    {doc}")
 
 
 @flight.command('flysto-auth')
@@ -838,48 +839,6 @@ def config_migrate(ctx, legacy_config: Path, output_file: Optional[Path]):
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
-
-
-# ============================================================================
-# Automatic Processing Command
-# ============================================================================
-
-@cli.command('auto-process')
-@click.argument(
-    'device',
-    type=click.Path(path_type=Path),
-    required=False
-)
-@click.pass_context
-def auto_process(ctx, device: Optional[Path]):
-    """
-    Automatically process both flight data and navigation databases.
-
-    This is the main command triggered by systemd when an SD card is inserted.
-    It will:
-      1. Process any flight logs on the card
-      2. Check for and install database updates
-      3. Safely unmount the card
-
-    If DEVICE is not provided, attempts to auto-detect SD card.
-    """
-    click.echo("=" * 60)
-    click.echo("Aviation Tools - Automatic SD Card Processing")
-    click.echo("=" * 60)
-
-    cfg = ctx.obj['config']
-
-    # Process flight data if enabled
-    if cfg.flight_data.enabled:
-        click.echo("\n[1/2] Processing flight data...")
-        click.echo("Flight data processing functionality coming soon...")
-
-    # Update navigation databases if enabled
-    if cfg.navdata.enabled:
-        click.echo("\n[2/2] Checking for navigation database updates...")
-        click.echo("Navigation database update functionality coming soon...")
-
-    click.echo("\n✓ Processing complete!")
 
 
 # ============================================================================

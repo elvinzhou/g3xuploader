@@ -482,8 +482,14 @@ class G3XDatabaseWriter:
         logger.info(f"Writing {db_type} database ({len(source_files)} files, {total_bytes} bytes)")
         
         for dest_rel_path, source_file in source_files.items():
-            dest_path = self.mount_point / dest_rel_path
-            
+            dest_path = (self.mount_point / dest_rel_path).resolve()
+
+            # Guard against path traversal attacks
+            if not str(dest_path).startswith(str(self.mount_point.resolve())):
+                logger.warning(f"Skipping unsafe destination path: {dest_rel_path}")
+                errors.append(f"Unsafe destination path rejected: {dest_rel_path}")
+                continue
+
             try:
                 # Create parent directories
                 dest_path.parent.mkdir(parents=True, exist_ok=True)

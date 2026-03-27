@@ -348,7 +348,7 @@ class FlyStoUploader(FlightDataUploader):
                 # Clean up temp ZIP file
                 try:
                     os.unlink(zip_path)
-                except:
+                except OSError:
                     pass
 
         except Exception as e:
