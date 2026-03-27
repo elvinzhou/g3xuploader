@@ -109,6 +109,11 @@ class Config:
         Path.home() / ".avcardtool" / "config.json",
     ]
 
+    LEGACY_PATHS = [
+        Path("/etc/aviation_tools/config.json"),
+        Path("/etc/g3x_processor/config.json"),
+    ]
+
     @staticmethod
     def get_base_dir() -> Path:
         """Get the base directory of the application, handling standalone binary mode."""
