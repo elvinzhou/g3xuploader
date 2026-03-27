@@ -97,9 +97,10 @@ if [ -f "pyproject.toml" ] && [ -d "src/avcardtool" ]; then
     sudo -u "$REAL_USER" "$VENV_DIR/bin/pip" install --upgrade pip -q
     sudo -u "$REAL_USER" "$VENV_DIR/bin/pip" install -e . -q
 else
-    echo "Installing avcardtool==${INSTALL_VERSION} from PyPI..."
+    echo "Installing avcardtool v${INSTALL_VERSION} from GitHub..."
     sudo -u "$REAL_USER" "$VENV_DIR/bin/pip" install --upgrade pip -q
-    sudo -u "$REAL_USER" "$VENV_DIR/bin/pip" install "avcardtool==${INSTALL_VERSION}" -q
+    sudo -u "$REAL_USER" "$VENV_DIR/bin/pip" install \
+        "git+https://github.com/elvinzhou/g3xuploader.git@v${INSTALL_VERSION}" -q
 fi
 
 # Symlink into system PATH (still root-owned, pointing into the user venv)
