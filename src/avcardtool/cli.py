@@ -15,6 +15,41 @@ from typing import Optional
 import click
 import logging
 
+
+def _prompt_password(prompt: str = "Password: ") -> str:
+    """Prompt for a password, displaying * for each character typed."""
+    import termios
+    import tty
+
+    sys.stdout.write(prompt)
+    sys.stdout.flush()
+
+    chars = []
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+        while True:
+            ch = sys.stdin.read(1)
+            if ch in ('\r', '\n'):
+                break
+            elif ch in ('\x7f', '\x08'):  # backspace / delete
+                if chars:
+                    chars.pop()
+                    sys.stdout.write('\b \b')
+                    sys.stdout.flush()
+            elif ch == '\x03':  # Ctrl-C
+                raise KeyboardInterrupt
+            else:
+                chars.append(ch)
+                sys.stdout.write('*')
+                sys.stdout.flush()
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+    sys.stdout.write('\n')
+    return ''.join(chars)
+
 from avcardtool import __version__
 from avcardtool.core import Config, setup_logging
 
@@ -646,15 +681,12 @@ def navdata(ctx):
 
 @navdata.command('login')
 @click.option('--email', '-e', prompt=True, help='Garmin account email')
-@click.option(
-    '--password', '-p',
-    prompt=True,
-    hide_input=True,
-    help='Garmin account password'
-)
+@click.option('--password', '-p', default=None, help='Garmin account password')
 @click.option('--force', is_flag=True, help='Force re-login')
 @click.pass_context
-def navdata_login(ctx, email: str, password: str, force: bool):
+def navdata_login(ctx, email: str, password: Optional[str], force: bool):
+    if password is None:
+        password = _prompt_password("Password: ")
     """Login to Garmin flyGarmin portal."""
     from avcardtool.navdata.garmin.auth import GarminAuth, GarminAuthError
     
