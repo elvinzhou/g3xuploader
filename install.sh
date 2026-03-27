@@ -2,235 +2,245 @@
 #
 # Installation Script for AVCardTool
 #
-# This script installs the avcardtool package which combines:
-#   1. Flight data processing (formerly g3x_processor)
-#   2. Navigation database management (formerly g3x_db_updater)
+# Installs the Python package into a per-user virtual environment and
+# configures the system-level components (udev rules, systemd service)
+# that still require root.
 #
 # Usage: sudo ./install.sh
+#        sudo bash -c "$(curl -sSL https://raw.githubusercontent.com/elvinzhou/g3xuploader/main/install.sh)"
 #
 
 set -e
 
+INSTALL_VERSION="1.2.0"
+VENV_DIR="/opt/avcardtool/venv"
+SYMLINK="/usr/local/bin/avcardtool"
+
 echo "======================================================================"
-echo "AVCardTool - Installation"
+echo "AVCardTool v${INSTALL_VERSION} - Installation"
 echo "======================================================================"
 echo ""
 
-# Check if running as root
+# ---------------------------------------------------------------------------
+# Require root (needed for udev, systemd, and /opt)
+# ---------------------------------------------------------------------------
 if [ "$EUID" -ne 0 ]; then
     echo "Error: This script must be run as root (use sudo)"
     exit 1
 fi
 
-# If we are in a local clone, ensure we are in the root directory
-if [ -f "pyproject.toml" ]; then
-    if [ ! -d "systemd" ] || [ ! -f "systemd/99-avcardtool-sdcard.rules" ]; then
-        echo "Error: Please run this script from the project root directory."
-        exit 1
-    fi
-fi
-
-# Detect the user who invoked sudo
-if [ -n "$SUDO_USER" ]; then
+# Detect the real (non-root) user who invoked sudo
+if [ -n "$SUDO_USER" ] && [ "$SUDO_USER" != "root" ]; then
     REAL_USER="$SUDO_USER"
 else
     REAL_USER="$USER"
 fi
+REAL_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
 
-echo "Installing for user: $REAL_USER"
+echo "Installing for user: $REAL_USER (home: $REAL_HOME)"
 echo ""
 
-# ============================================================================
-# Step 1: Install system dependencies
-# ============================================================================
+# User-space paths (owned by REAL_USER)
+CONFIG_DIR="$REAL_HOME/.config/avcardtool"
+DATA_DIR="$REAL_HOME/.local/share/avcardtool"
+CONFIG_FILE="$CONFIG_DIR/config.json"
 
-echo "[1/7] Installing system dependencies..."
+# ---------------------------------------------------------------------------
+# Detect existing installation and confirm upgrade
+# ---------------------------------------------------------------------------
+if [ -x "$SYMLINK" ]; then
+    CURRENT_VERSION=$(sudo -u "$REAL_USER" "$SYMLINK" --version 2>/dev/null | awk '{print $NF}' || true)
+    if [ -n "$CURRENT_VERSION" ] && [ "$CURRENT_VERSION" != "$INSTALL_VERSION" ]; then
+        echo "Existing installation found: v${CURRENT_VERSION}"
+        echo "This will upgrade to:        v${INSTALL_VERSION}"
+        echo ""
+        read -r -p "Continue? [y/N] " confirm
+        case "$confirm" in
+            [yY][eE][sS]|[yY]) ;;
+            *) echo "Aborted."; exit 0 ;;
+        esac
+        echo ""
+    elif [ "$CURRENT_VERSION" = "$INSTALL_VERSION" ]; then
+        echo "v${INSTALL_VERSION} is already installed."
+        read -r -p "Reinstall? [y/N] " confirm
+        case "$confirm" in
+            [yY][eE][sS]|[yY]) ;;
+            *) echo "Nothing to do."; exit 0 ;;
+        esac
+        echo ""
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Step 1: System dependencies
+# ---------------------------------------------------------------------------
+echo "[1/6] Installing system dependencies..."
 apt-get update -qq
 apt-get install -y python3 python3-pip python3-venv udev util-linux
+echo "Done"
 
-# ============================================================================
-# Step 2: Create virtual environment and install package
-# ============================================================================
+# ---------------------------------------------------------------------------
+# Step 2: Python virtual environment (owned by REAL_USER)
+# ---------------------------------------------------------------------------
+echo "[2/6] Setting up Python environment..."
 
-echo "[2/7] Setting up Python environment..."
-
-# Remove old installations if they exist
-rm -rf /opt/avcardtool
-rm -rf /opt/aviation_tools  # Remove legacy installation
-
-# Create directory and virtual environment
+# Remove old installation cleanly
+rm -rf "$VENV_DIR"
+rm -rf /opt/avcardtool  # recreate below
 mkdir -p /opt/avcardtool
-python3 -m venv /opt/avcardtool/venv
+chown "$REAL_USER":"$REAL_USER" /opt/avcardtool
+
+# Create venv as the real user
+sudo -u "$REAL_USER" python3 -m venv "$VENV_DIR"
 
 # Install the package
-echo "Installing avcardtool package..."
-/opt/avcardtool/venv/bin/pip install --upgrade pip
-
-# Detect if we're in a git clone or running standalone
-if [ -f "pyproject.toml" ]; then
-    echo "Local pyproject.toml found, installing from local source..."
-    /opt/avcardtool/venv/bin/pip install -e .
+if [ -f "pyproject.toml" ] && [ -d "src/avcardtool" ]; then
+    echo "Local source found — installing from source..."
+    sudo -u "$REAL_USER" "$VENV_DIR/bin/pip" install --upgrade pip -q
+    sudo -u "$REAL_USER" "$VENV_DIR/bin/pip" install -e . -q
 else
-    echo "No local source found, installing directly from GitHub..."
-    /opt/avcardtool/venv/bin/pip install "git+https://github.com/elvinzhou/g3xuploader.git"
+    echo "Installing avcardtool==${INSTALL_VERSION} from PyPI..."
+    sudo -u "$REAL_USER" "$VENV_DIR/bin/pip" install --upgrade pip -q
+    sudo -u "$REAL_USER" "$VENV_DIR/bin/pip" install "avcardtool==${INSTALL_VERSION}" -q
 fi
 
-# Create symlink for easy access
-rm -f /usr/local/bin/aviation-tools  # Remove legacy symlink
-ln -sf /opt/avcardtool/venv/bin/avcardtool /usr/local/bin/avcardtool
+# Symlink into system PATH (still root-owned, pointing into the user venv)
+rm -f "$SYMLINK"
+rm -f /usr/local/bin/aviation-tools  # remove legacy
+ln -sf "$VENV_DIR/bin/avcardtool" "$SYMLINK"
 
-echo "✓ Package installed"
+echo "Done ($(sudo -u "$REAL_USER" "$SYMLINK" --version 2>/dev/null || echo 'unknown version'))"
 
-# ============================================================================
-# Step 3: Create configuration directory
-# ============================================================================
+# ---------------------------------------------------------------------------
+# Step 3: User-space config and data directories
+# ---------------------------------------------------------------------------
+echo "[3/6] Creating user directories..."
 
-echo "[3/7] Creating configuration directories..."
+sudo -u "$REAL_USER" mkdir -p "$CONFIG_DIR"
+sudo -u "$REAL_USER" mkdir -p "$DATA_DIR"
 
-# Create config directory
-mkdir -p /etc/avcardtool
-
-# Generate default config if it doesn't exist
-if [ ! -f /etc/avcardtool/config.json ]; then
+if [ ! -f "$CONFIG_FILE" ]; then
     echo "Generating default configuration..."
-    /usr/local/bin/avcardtool config generate /etc/avcardtool/config.json
-    chmod 644 /etc/avcardtool/config.json
-    echo "✓ Default configuration created: /etc/avcardtool/config.json"
-    echo "  Please edit this file to configure your settings"
+    sudo -u "$REAL_USER" "$SYMLINK" config generate "$CONFIG_FILE"
+    echo "Default config created: $CONFIG_FILE"
 else
-    echo "✓ Configuration file already exists: /etc/avcardtool/config.json"
+    echo "Config already exists: $CONFIG_FILE"
 fi
 
-# Migrate legacy config if it exists
-if [ -f /etc/aviation_tools/config.json ] && [ ! -f /etc/avcardtool/config.json.migrated ]; then
-    echo "Found legacy aviation_tools configuration, migrating..."
-    cp /etc/aviation_tools/config.json /etc/avcardtool/config.json.migrated
-    echo "✓ Legacy config copied to: /etc/avcardtool/config.json.migrated"
-    echo "  Review and rename to config.json if you want to use it"
-fi
+# Migrate legacy configs if present
+for LEGACY in /etc/aviation_tools/config.json /etc/g3x_processor/config.json; do
+    if [ -f "$LEGACY" ] && [ ! -f "${CONFIG_FILE}.legacy" ]; then
+        cp "$LEGACY" "${CONFIG_FILE}.legacy"
+        chown "$REAL_USER":"$REAL_USER" "${CONFIG_FILE}.legacy"
+        echo "Legacy config copied to: ${CONFIG_FILE}.legacy (review and rename if wanted)"
+    fi
+done
 
-if [ -f /etc/g3x_processor/config.json ] && [ ! -f /etc/avcardtool/config.json.g3x_legacy ]; then
-    echo "Found legacy g3x_processor configuration..."
-    cp /etc/g3x_processor/config.json /etc/avcardtool/config.json.g3x_legacy
-    echo "✓ Legacy config copied to: /etc/avcardtool/config.json.g3x_legacy"
-    echo "  Review and rename to config.json if you want to use it"
-fi
+echo "Done"
 
-# ============================================================================
-# Step 4: Create data directories
-# ============================================================================
-
-echo "[4/7] Creating data directories..."
-
-mkdir -p /var/lib/avcardtool
-mkdir -p /var/lib/avcardtool/processed_files
-mkdir -p /var/lib/avcardtool/staging
-mkdir -p /var/lib/avcardtool/downloads
-
-# Set permissions
-chown -R root:root /var/lib/avcardtool
-chmod -R 755 /var/lib/avcardtool
-
-echo "✓ Data directories created"
-
-# ============================================================================
-# Step 5: Create log directory
-# ============================================================================
-
-echo "[5/7] Setting up logging..."
-
-# Create log directory
-mkdir -p /var/log/avcardtool
-
-# Create log file
-touch /var/log/avcardtool/avcardtool.log
-chmod 644 /var/log/avcardtool/avcardtool.log
-
-echo "✓ Log directory created"
-
-# ============================================================================
-# Step 6: Install udev rules
-# ============================================================================
-
-echo "[6/7] Installing udev rules..."
+# ---------------------------------------------------------------------------
+# Step 4: udev rules  (requires root — stays system-level)
+# ---------------------------------------------------------------------------
+echo "[4/6] Installing udev rules..."
 
 UDEV_RULE_PATH="/etc/udev/rules.d/99-avcardtool-sdcard.rules"
 
 if [ -f "systemd/99-avcardtool-sdcard.rules" ]; then
     cp systemd/99-avcardtool-sdcard.rules "$UDEV_RULE_PATH"
 else
-    echo "Local udev rule not found, downloading from GitHub..."
-    curl -sSL "https://raw.githubusercontent.com/elvinzhou/g3xuploader/main/systemd/99-avcardtool-sdcard.rules" -o "$UDEV_RULE_PATH"
+    echo "Downloading udev rules from GitHub..."
+    curl -sSL \
+        "https://raw.githubusercontent.com/elvinzhou/g3xuploader/v${INSTALL_VERSION}/systemd/99-avcardtool-sdcard.rules" \
+        -o "$UDEV_RULE_PATH"
 fi
 
 chmod 644 "$UDEV_RULE_PATH"
 
-# Remove old udev rules if they exist
+# Remove legacy rules
 rm -f /etc/udev/rules.d/99-aviation-sdcard.rules
 rm -f /etc/udev/rules.d/99-g3x-sdcard.rules
 rm -f /etc/udev/rules.d/99-g3x-db-sdcard.rules
 
-# Reload udev rules
 udevadm control --reload-rules
 udevadm trigger
 
-echo "✓ Udev rules installed"
+echo "Done"
 
-# ============================================================================
-# Step 7: Install systemd service
-# ============================================================================
+# ---------------------------------------------------------------------------
+# Step 5: systemd service  (requires root — stays system-level)
+# ---------------------------------------------------------------------------
+echo "[5/6] Installing systemd service..."
 
-echo "[7/7] Installing systemd service..."
+SERVICE_SRC="systemd/avcardtool-processor@.service"
+SERVICE_DEST="/lib/systemd/system/avcardtool-processor@.service"
 
-SERVICE_PATH="/lib/systemd/system/avcardtool-processor@.service"
-
-if [ -f "systemd/avcardtool-processor@.service" ]; then
-    cp systemd/avcardtool-processor@.service "$SERVICE_PATH"
-else
-    echo "Local systemd service file not found, downloading from GitHub..."
-    curl -sSL "https://raw.githubusercontent.com/elvinzhou/g3xuploader/main/systemd/avcardtool-processor@.service" -o "$SERVICE_PATH"
+TMP_SERVICE=""
+if [ ! -f "$SERVICE_SRC" ]; then
+    echo "Downloading service file from GitHub..."
+    TMP_SERVICE=$(mktemp)
+    curl -sSL \
+        "https://raw.githubusercontent.com/elvinzhou/g3xuploader/v${INSTALL_VERSION}/systemd/avcardtool-processor@.service" \
+        -o "$TMP_SERVICE"
+    SERVICE_SRC="$TMP_SERVICE"
 fi
 
-chmod 644 "$SERVICE_PATH"
+# Substitute placeholders with real user paths
+sed \
+    -e "s|AVCARDTOOL_USER|${REAL_USER}|g" \
+    -e "s|AVCARDTOOL_DATA_DIR|${DATA_DIR}|g" \
+    -e "s|AVCARDTOOL_CONFIG_DIR|${CONFIG_DIR}|g" \
+    "$SERVICE_SRC" > "$SERVICE_DEST"
 
-# Remove old systemd services if they exist
+[ -n "$TMP_SERVICE" ] && rm -f "$TMP_SERVICE"
+
+chmod 644 "$SERVICE_DEST"
+
+# Remove legacy services
 systemctl disable aviation-processor@.service 2>/dev/null || true
 systemctl disable g3x-processor@.service 2>/dev/null || true
 rm -f /lib/systemd/system/aviation-processor@.service
 rm -f /lib/systemd/system/g3x-processor@.service
 rm -f /lib/systemd/system/g3x-db-updater@.service
 
-# Reload systemd
 systemctl daemon-reload
 
-echo "✓ Systemd service installed"
+echo "Done"
 
-# ============================================================================
-# Installation Complete
-# ============================================================================
+# ---------------------------------------------------------------------------
+# Step 6: Clean up legacy system paths (no longer used)
+# ---------------------------------------------------------------------------
+echo "[6/6] Cleaning up legacy system paths..."
 
+for OLD_PATH in /var/lib/avcardtool /etc/avcardtool; do
+    if [ -d "$OLD_PATH" ]; then
+        echo "  Removing $OLD_PATH (data now lives in $DATA_DIR)"
+        rm -rf "$OLD_PATH"
+    fi
+done
+
+echo "Done"
+
+# ---------------------------------------------------------------------------
+# Complete
+# ---------------------------------------------------------------------------
 echo ""
 echo "======================================================================"
 echo "Installation Complete!"
 echo "======================================================================"
 echo ""
-echo "Configuration file: /etc/avcardtool/config.json"
-echo "Command-line tool:  avcardtool"
-echo "Log file:          /var/log/avcardtool/avcardtool.log"
+echo "Config file:   $CONFIG_FILE"
+echo "Data/logs:     $DATA_DIR"
+echo "Command:       avcardtool"
 echo ""
 echo "Next steps:"
-echo "  1. Edit /etc/avcardtool/config.json with your settings"
+echo "  1. Edit $CONFIG_FILE with your settings"
 echo "  2. Configure upload service credentials"
-echo "  3. Configure Garmin account for navdata downloads (if needed)"
-echo "  4. Insert an SD card to test automatic processing"
+echo "  3. Insert an SD card to test automatic processing"
 echo ""
-echo "Test the installation:"
+echo "Useful commands:"
 echo "  avcardtool --help"
 echo "  avcardtool config show"
-echo "  avcardtool flight list-processors"
-echo ""
-echo "View logs:"
+echo "  avcardtool self-update"
 echo "  journalctl -u avcardtool-processor@* -f"
-echo "  tail -f /var/log/avcardtool/avcardtool.log"
 echo ""
 echo "======================================================================"

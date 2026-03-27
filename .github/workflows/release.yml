@@ -1,4 +1,4 @@
-name: Release Build
+name: Release
 
 on:
   push:
@@ -7,11 +7,65 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-arm64:
+  # ---------------------------------------------------------------------------
+  # Publish pure-Python wheel to PyPI
+  # ---------------------------------------------------------------------------
+  publish-pypi:
+    name: Publish to PyPI
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write  # required for PyPI trusted publishing
+
     steps:
-      - name: Build Paused
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Poetry
+        run: pip install poetry
+
+      - name: Build wheel and sdist
+        run: poetry build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        # Uses OIDC trusted publishing — no API token secret needed.
+        # Configure the trusted publisher on PyPI:
+        #   Publisher: GitHub Actions
+        #   Repository: elvinzhou/g3xuploader
+        #   Workflow: release.yml
+
+  # ---------------------------------------------------------------------------
+  # Build .deb for Raspberry Pi (arm64)
+  # The package bundles the wheel; no C compilation required.
+  # ---------------------------------------------------------------------------
+  build-deb:
+    name: Build .deb (arm64)
+    runs-on: ubuntu-latest
+    needs: publish-pypi
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Poetry and dpkg tools
         run: |
-          echo "Binary bundling and .deb packaging are temporarily paused."
-          echo "Please use the install.sh script for direct Python-based installation."
-          exit 0
+          pip install poetry
+          sudo apt-get install -y dpkg-dev
+
+      - name: Build wheel
+        run: poetry build
+
+      - name: Build .deb package
+        run: bash package_deb.sh
+
+      - name: Upload .deb to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.deb
+          generate_release_notes: true

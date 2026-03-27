@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(grep -c '\"\"type\"\":\"\"assistant\"\"' /home/elvinzhou/.claude/projects/-mnt-d-GitHub-g3xuploader/4a6442ae-58ae-448d-a9db-e202253af97a/tool-results/ba10ekmg1.txt)"
+      "Bash(grep -c '\"\"type\"\":\"\"assistant\"\"' /home/elvinzhou/.claude/projects/-mnt-d-GitHub-g3xuploader/4a6442ae-58ae-448d-a9db-e202253af97a/tool-results/ba10ekmg1.txt)",
+      "Bash(python3:*)"
     ]
   }
 }

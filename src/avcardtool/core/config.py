@@ -90,8 +90,8 @@ class NavdataConfig:
 @dataclass
 class SystemConfig:
     """System-level configuration"""
-    data_dir: str = str(Path.home() / ".local" / "share" / "avcardtool")
-    log_file: str = str(Path.home() / ".local" / "share" / "avcardtool" / "avcardtool.log")
+    data_dir: str = field(default_factory=lambda: str(Path.home() / ".local" / "share" / "avcardtool"))
+    log_file: str = field(default_factory=lambda: str(Path.home() / ".local" / "share" / "avcardtool" / "avcardtool.log"))
     log_level: str = "INFO"
     debug: bool = False
 

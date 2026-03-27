@@ -9,15 +9,14 @@ Type=oneshot
 ExecStart=/usr/local/bin/avcardtool auto-process /dev/%i
 StandardOutput=journal
 StandardError=journal
-User=avcardtool
-Group=avcardtool
+User=AVCARDTOOL_USER
+Group=AVCARDTOOL_USER
 
 # Security hardening
 PrivateTmp=yes
 NoNewPrivileges=true
 ProtectSystem=strict
-ProtectHome=yes
-ReadWritePaths=/var/lib/avcardtool /var/log
+ReadWritePaths=AVCARDTOOL_DATA_DIR AVCARDTOOL_CONFIG_DIR
 
 # Resource limits
 TimeoutStartSec=600

@@ -281,7 +281,7 @@ def flight_upload(ctx, log_file: Path, service: tuple, dry_run: bool):
             # Upload to all enabled services
             upload_services = []
             for service_name in cfg.flight_data.uploaders:
-                if cfg.flight_data.uploaders[service_name].get('enabled', False):
+                if cfg.flight_data.uploaders[service_name].enabled:
                     upload_services.append(service_name)
 
         if not upload_services:
@@ -301,10 +301,12 @@ def flight_upload(ctx, log_file: Path, service: tuple, dry_run: bool):
                 click.echo(f"✗ {service_name}: Not configured")
                 continue
 
-            uploader_config = cfg.flight_data.uploaders[service_name]
+            uploader_cfg = cfg.flight_data.uploaders[service_name]
             UploaderClass = UPLOADERS[service_name]
 
-            # Add global settings to uploader config
+            # Build config dict with global settings merged in
+            uploader_config = dict(uploader_cfg.config)
+            uploader_config['enabled'] = uploader_cfg.enabled
             uploader_config['data_dir'] = cfg.system.data_dir
             uploader_config['debug'] = cfg.system.debug
 
@@ -364,8 +366,8 @@ def flight_list_uploaders(ctx):
     click.echo("Available Upload Services:\n")
 
     for service_name, UploaderClass in UPLOADERS.items():
-        uploader_config = cfg.flight_data.uploaders.get(service_name, {})
-        enabled = uploader_config.get('enabled', False)
+        uploader_cfg = cfg.flight_data.uploaders.get(service_name)
+        enabled = uploader_cfg.enabled if uploader_cfg else False
         status = "✓ enabled" if enabled else "disabled"
 
         uploader = UploaderClass({})
@@ -494,6 +496,8 @@ def auto_process(ctx, path: Path, service: tuple, skip_uploads: bool):
 
     click.echo(f"Found {len(log_files)} log file(s)\n")
 
+    upload_services = list(service) if service else []
+
     # Process each file
     stats = {
         'total': len(log_files),
@@ -566,7 +570,7 @@ def auto_process(ctx, path: Path, service: tuple, skip_uploads: bool):
             else:
                 upload_services = []
                 for service_name in cfg.flight_data.uploaders:
-                    if cfg.flight_data.uploaders[service_name].get('enabled', False):
+                    if cfg.flight_data.uploaders[service_name].enabled:
                         upload_services.append(service_name)
 
             upload_results = {}
@@ -574,7 +578,11 @@ def auto_process(ctx, path: Path, service: tuple, skip_uploads: bool):
                 if service_name not in UPLOADERS:
                     continue
 
-                uploader_config = cfg.flight_data.uploaders.get(service_name, {})
+                uploader_cfg = cfg.flight_data.uploaders.get(service_name)
+                if uploader_cfg is None:
+                    continue
+                uploader_config = dict(uploader_cfg.config)
+                uploader_config['enabled'] = uploader_cfg.enabled
                 uploader_config['data_dir'] = cfg.system.data_dir
                 uploader_config['debug'] = cfg.system.debug
                 UploaderClass = UPLOADERS[service_name]
@@ -838,6 +846,49 @@ def config_migrate(ctx, legacy_config: Path, output_file: Optional[Path]):
 
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+
+# ============================================================================
+# Self-Update Command
+# ============================================================================
+
+@cli.command('self-update')
+@click.option(
+    '--version',
+    default=None,
+    metavar='VERSION',
+    help='Install a specific version (e.g. 1.2.0). Defaults to latest.'
+)
+@click.pass_context
+def self_update(ctx, version: Optional[str]):
+    """
+    Update avcardtool to the latest version from PyPI.
+
+    Uses the same Python interpreter that is currently running so the correct
+    virtual environment or user installation is always targeted.
+
+    Examples:
+        avcardtool self-update
+        avcardtool self-update --version 1.2.0
+    """
+    import subprocess
+
+    package = f"avcardtool=={version}" if version else "avcardtool"
+    target = f"v{version}" if version else "latest"
+
+    click.echo(f"Updating avcardtool to {target}...")
+
+    result = subprocess.run(
+        [sys.executable, '-m', 'pip', 'install', '--upgrade', package],
+        capture_output=True,
+        text=True
+    )
+
+    if result.returncode == 0:
+        click.echo("Update successful. Restart avcardtool to use the new version.")
+    else:
+        click.echo(f"Update failed:\n{result.stderr.strip()}", err=True)
         sys.exit(1)
 
 
