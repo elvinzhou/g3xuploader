@@ -5,7 +5,7 @@ A modular system for processing flight logs from various manufacturers and manag
 aviation navigation databases.
 """
 
-__version__ = "1.3.2"
+__version__ = "1.3.3"
 __author__ = "Aviation Tools Contributors"
 
 from avcardtool.core.config import Config
