@@ -22,6 +22,14 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
+# If we are in a local clone, ensure we are in the root directory
+if [ -f "pyproject.toml" ]; then
+    if [ ! -d "systemd" ] || [ ! -f "systemd/99-avcardtool-sdcard.rules" ]; then
+        echo "Error: Please run this script from the project root directory."
+        exit 1
+    fi
+fi
+
 # Detect the user who invoked sudo
 if [ -n "$SUDO_USER" ]; then
     REAL_USER="$SUDO_USER"
@@ -146,9 +154,16 @@ echo "✓ Log directory created"
 
 echo "[6/7] Installing udev rules..."
 
-# Copy udev rule from systemd directory
-cp systemd/99-avcardtool-sdcard.rules /etc/udev/rules.d/99-avcardtool-sdcard.rules
-chmod 644 /etc/udev/rules.d/99-avcardtool-sdcard.rules
+UDEV_RULE_PATH="/etc/udev/rules.d/99-avcardtool-sdcard.rules"
+
+if [ -f "systemd/99-avcardtool-sdcard.rules" ]; then
+    cp systemd/99-avcardtool-sdcard.rules "$UDEV_RULE_PATH"
+else
+    echo "Local udev rule not found, downloading from GitHub..."
+    curl -sSL "https://raw.githubusercontent.com/elvinzhou/g3xuploader/main/systemd/99-avcardtool-sdcard.rules" -o "$UDEV_RULE_PATH"
+fi
+
+chmod 644 "$UDEV_RULE_PATH"
 
 # Remove old udev rules if they exist
 rm -f /etc/udev/rules.d/99-aviation-sdcard.rules
@@ -167,9 +182,16 @@ echo "✓ Udev rules installed"
 
 echo "[7/7] Installing systemd service..."
 
-# Copy systemd service from systemd directory
-cp systemd/avcardtool-processor@.service /lib/systemd/system/avcardtool-processor@.service
-chmod 644 /lib/systemd/system/avcardtool-processor@.service
+SERVICE_PATH="/lib/systemd/system/avcardtool-processor@.service"
+
+if [ -f "systemd/avcardtool-processor@.service" ]; then
+    cp systemd/avcardtool-processor@.service "$SERVICE_PATH"
+else
+    echo "Local systemd service file not found, downloading from GitHub..."
+    curl -sSL "https://raw.githubusercontent.com/elvinzhou/g3xuploader/main/systemd/avcardtool-processor@.service" -o "$SERVICE_PATH"
+fi
+
+chmod 644 "$SERVICE_PATH"
 
 # Remove old systemd services if they exist
 systemctl disable aviation-processor@.service 2>/dev/null || true

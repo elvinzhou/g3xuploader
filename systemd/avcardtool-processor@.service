@@ -1,6 +1,6 @@
 [Unit]
 Description=AVCardTool Processor for %i
-Documentation=https://github.com/your-org/avcardtool
+Documentation=https://github.com/elvinzhou/g3xuploader
 BindsTo=dev-%i.device
 After=dev-%i.device
 
