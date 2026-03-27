@@ -863,7 +863,7 @@ def config_migrate(ctx, legacy_config: Path, output_file: Optional[Path]):
 @click.pass_context
 def self_update(ctx, version: Optional[str]):
     """
-    Update avcardtool to the latest version from PyPI.
+    Update avcardtool to the latest version from GitHub.
 
     Uses the same Python interpreter that is currently running so the correct
     virtual environment or user installation is always targeted.
@@ -872,9 +872,11 @@ def self_update(ctx, version: Optional[str]):
         avcardtool self-update
         avcardtool self-update --version 1.2.0
     """
+    import re
     import subprocess
 
-    package = f"avcardtool=={version}" if version else "avcardtool"
+    repo = "git+https://github.com/elvinzhou/g3xuploader.git"
+    package = f"{repo}@v{version}" if version else repo
     target = f"v{version}" if version else "latest"
 
     click.echo(f"Updating avcardtool to {target}...")
@@ -886,7 +888,12 @@ def self_update(ctx, version: Optional[str]):
     )
 
     if result.returncode == 0:
-        click.echo("Update successful. Restart avcardtool to use the new version.")
+        # Extract installed version from pip output, e.g. "Successfully installed avcardtool-1.3.2"
+        match = re.search(r'Successfully installed avcardtool-([\d.]+)', result.stdout)
+        if match:
+            click.echo(f"Updated to v{match.group(1)}. Restart avcardtool service to apply.")
+        else:
+            click.echo("Update successful. Restart avcardtool service to apply.")
     else:
         click.echo(f"Update failed:\n{result.stderr.strip()}", err=True)
         sys.exit(1)
