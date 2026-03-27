@@ -685,13 +685,15 @@ def navdata(ctx):
 @click.option('--force', is_flag=True, help='Force re-login')
 @click.pass_context
 def navdata_login(ctx, email: str, password: Optional[str], force: bool):
+    """Login to Garmin flyGarmin portal."""
     if password is None:
         password = _prompt_password("Password: ")
-    """Login to Garmin flyGarmin portal."""
     from avcardtool.navdata.garmin.auth import GarminAuth, GarminAuthError
-    
-    auth = GarminAuth()
-    
+
+    cfg = ctx.obj['config']
+    from pathlib import Path as _Path
+    auth = GarminAuth(token_dir=_Path(cfg.system.data_dir))
+
     if auth.is_authenticated() and not force:
         click.echo(f"Already authenticated as {auth.tokens.display_name}")
         return
@@ -707,7 +709,7 @@ def navdata_login(ctx, email: str, password: Optional[str], force: bool):
         success = auth.login(email, password, mfa_callback=get_mfa_code)
         
         if success:
-            click.echo(f"✓ Login successful! Tokens saved to {auth.token_file}")
+            click.echo(f"✓ Logged in as {auth.tokens.display_name}. Tokens saved to {auth.token_file}")
             click.echo("You can now download and update databases.")
     except GarminAuthError as e:
         click.echo(f"✗ Login failed: {e}", err=True)
