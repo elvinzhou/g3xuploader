@@ -26,7 +26,7 @@ The recommended way to install AVCardTool is using the provided installation scr
 Copy and paste this command into your terminal:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/yourusername/avcardtool/main/install.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/elvinzhou/g3xuploader/main/install.sh | sudo bash
 ```
 
 This command will:
