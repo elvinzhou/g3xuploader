@@ -320,9 +320,10 @@ class GarminAuth:
             )
 
             if response.status_code == 429:
+                retry_after = response.headers.get("Retry-After")
+                wait_msg = f" Try again in {retry_after} seconds." if retry_after else " Wait a few minutes and try again."
                 raise GarminAuthError(
-                    "Garmin is rate-limiting logins from your IP (HTTP 429). "
-                    "Wait a few minutes and try again."
+                    f"Garmin is rate-limiting logins from your IP (HTTP 429).{wait_msg}"
                 )
             if response.status_code >= 400:
                 raise GarminAuthError(
