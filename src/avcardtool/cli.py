@@ -8,6 +8,7 @@ Provides subcommands for:
 - Automatic processing (auto-process)
 """
 
+import os
 import sys
 import json
 from pathlib import Path
