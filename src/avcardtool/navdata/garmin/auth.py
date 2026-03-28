@@ -400,11 +400,20 @@ class GarminAuth:
     def ensure_authenticated(self) -> bool:
         if self.is_authenticated():
             return True
-        if self.tokens.refresh_token:
-            try:
-                return self._refresh_tokens()
-            except Exception as e:
-                logger.warning(f"Token refresh failed: {e}")
+        if not self.tokens.access_token:
+            logger.warning(f"No Garmin tokens found (looked in {self.token_file}). Run 'avcardtool navdata login' first.")
+            return False
+        if self.tokens.is_expired():
+            expires_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(self.tokens.expires_at))
+            logger.warning(f"Garmin access token expired at {expires_str} (now {time.strftime('%H:%M:%S')})")
+            if self.tokens.refresh_token:
+                try:
+                    return self._refresh_tokens()
+                except Exception as e:
+                    logger.warning(f"Token refresh failed: {e}")
+                logger.warning("Token refresh failed. Re-run 'avcardtool navdata login'.")
+            else:
+                logger.warning("No refresh token available. Re-run 'avcardtool navdata login'.")
         return False
 
     def _refresh_tokens(self) -> bool:

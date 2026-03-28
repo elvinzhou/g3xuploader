@@ -1819,7 +1819,10 @@ def navdata_auto_update(ctx, device: Optional[Path]):
     # ---------------------------------------------------------------
     auth = GarminAuth(token_dir=data_dir)
     if not auth.ensure_authenticated():
-        _log.error("Not authenticated. Run 'avcardtool navdata login' first.")
+        if auth.tokens.access_token:
+            _log.error("Garmin access token expired. Re-run 'avcardtool navdata login' to re-authenticate.")
+        else:
+            _log.error("Not authenticated. Run 'avcardtool navdata login' first.")
         sys.exit(1)
 
     api = FlyGarminAPI(auth)

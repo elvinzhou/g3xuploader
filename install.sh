@@ -144,6 +144,11 @@ else
         sed -i "s|\"log_file\": \"/var/log/[^\"]*\"|\"log_file\": \"${NEW_LOG_PATH}\"|" "$CONFIG_FILE"
         echo "  Patched stale log_file path -> $NEW_LOG_PATH"
     fi
+    # Patch stale /var/lib/avcardtool data_dir from old installs
+    if grep -q '"/var/lib/avcardtool"' "$CONFIG_FILE" 2>/dev/null; then
+        sed -i "s|\"data_dir\": \"/var/lib/avcardtool\"|\"data_dir\": \"${DATA_DIR}\"|" "$CONFIG_FILE"
+        echo "  Patched stale data_dir path -> $DATA_DIR"
+    fi
 fi
 
 # Migrate legacy configs if present
