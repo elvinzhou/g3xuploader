@@ -496,7 +496,7 @@ def auto_process(ctx, path: Path, service: tuple, skip_uploads: bool):
     if path.is_block_device():
         click.echo(f"Mounting device: {path}")
         from avcardtool.core import mount_device
-        mount_point = mount_device(str(path))
+        mount_point = mount_device(path)
         if not mount_point:
             click.echo(f"Error: Could not mount {path}", err=True)
             sys.exit(1)
