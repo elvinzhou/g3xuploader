@@ -1,32 +1,33 @@
 # udev rules for automatic aviation SD card processing
 #
-# This rule triggers when a FAT32-formatted SD card is inserted.
-# It starts the avcardtool-processor systemd service which:
-# 1. Analyzes flight logs
-# 2. Uploads to configured services
-# 3. Optionally updates navigation databases
+# When a FAT32-formatted SD card is inserted, two systemd services fire:
+#   avcardtool-processor@<dev>  — flight log analysis and upload
+#   avcardtool-navdata@<dev>    — navigation database auto-update
+#
+# Both run as one-shot services and log to the systemd journal.
 #
 # Installation:
 #   sudo cp 99-avcardtool-sdcard.rules /etc/udev/rules.d/
+#   sudo cp avcardtool-processor@.service /etc/systemd/system/
+#   sudo cp avcardtool-navdata@.service   /etc/systemd/system/
 #   sudo udevadm control --reload-rules
+#   sudo systemctl daemon-reload
 #
-# Testing:
-#   Insert SD card and check: journalctl -u avcardtool-processor@* -f
+# Monitoring:
+#   journalctl -u "avcardtool-*@*" -f
 
-# Match SD card block devices with FAT32 filesystem
-# TAG+="systemd" tells systemd to manage this device
-# ENV{SYSTEMD_WANTS} triggers the specified service
+# sdX partitions (USB card readers, most external adapters)
 ACTION=="add", \
   KERNEL=="sd[a-z][0-9]", \
   SUBSYSTEM=="block", \
   ENV{ID_FS_TYPE}=="vfat", \
   TAG+="systemd", \
-  ENV{SYSTEMD_WANTS}="avcardtool-processor@%k.service"
+  ENV{SYSTEMD_WANTS}="avcardtool-processor@%k.service avcardtool-navdata@%k.service"
 
-# Also handle mmcblk devices (SD cards on some systems)
+# mmcblkXpY partitions (built-in SD card readers)
 ACTION=="add", \
   KERNEL=="mmcblk[0-9]p[0-9]", \
   SUBSYSTEM=="block", \
   ENV{ID_FS_TYPE}=="vfat", \
   TAG+="systemd", \
-  ENV{SYSTEMD_WANTS}="avcardtool-processor@%k.service"
+  ENV{SYSTEMD_WANTS}="avcardtool-processor@%k.service avcardtool-navdata@%k.service"

@@ -864,24 +864,39 @@ def navdata_download(ctx, aircraft: int, device: Optional[int], series: Optional
             ))
 
         click.echo(f"\nCreating batch-update session for {len(batch_dbs)} database(s)...")
+        batch_id = None
+        batch_system_ids: list = []
         try:
             batch_id = api.create_batch_update(batch_dbs)
             click.echo(f"Batch ID: {batch_id}")
+            # GET the plan — the response includes device serial numbers (used for feat_unlk.dat)
+            batch_plan = api.get_batch_update(batch_id)
+            batch_system_ids = [
+                int(d["serial"])
+                for d in batch_plan.get("devices", [])
+                if isinstance(d.get("serial"), int)
+            ]
+            if batch_system_ids:
+                click.echo(f"Device serial(s): {batch_system_ids}")
         except Exception as e:
             click.echo(f"Warning: could not create batch session ({e}). Falling back to direct unlock.")
             batch_id = None
 
         # ---------------------------------------------------------------
-        # Step 3: for each entry unlock and download
+        # Step 3: for each entry unlock, fetch file list, and download
         # ---------------------------------------------------------------
+        manifest_entries = []
         downloaded = []
+
         for dev, avdb, s, target in plan:
             expiry = (target.invalid_at or "no expiry")[:10]
             click.echo(f"\n  {avdb.name}  device={dev.name}  series={s.series_id}  issue={target.name} (expires {expiry})")
 
             # Unlock with BatchUpdate auth if we have a session
+            unlock_codes = []
             try:
-                api.unlock(s.series_id, target.name, dev.device_id, card_serial, batch_id=batch_id)
+                unlock_resp = api.unlock(s.series_id, target.name, dev.device_id, card_serial, batch_id=batch_id)
+                unlock_codes = unlock_resp.get("unlockCodes", [])
                 click.echo("    Unlocked.")
             except Exception as e:
                 click.echo(f"    Warning: unlock failed ({e}) — attempting download anyway.")
@@ -903,9 +918,104 @@ def navdata_download(ctx, aircraft: int, device: Optional[int], series: Optional
                 click.echo(f"\r    {db_file.file_name}: done ({db_file.file_size:,} bytes)  ")
                 downloaded.append(dest)
 
+                # Peek at TAW header to get database_type (avionics device code).
+                # Used during install to filter out TAW files for other avionics units
+                # that share this subscription (e.g. jg600a, bdg600, shzn, tgtn).
+                taw_db_type = None
+                if dest.suffix.lower() == ".taw":
+                    try:
+                        from avcardtool.navdata.garmin.taw_parser import TAWParser
+                        taw_info = TAWParser().parse(dest)
+                        taw_db_type = taw_info.header.database_type
+                        click.echo(
+                            f"    avionics='{taw_info.header.avionics}' "
+                            f"db_type=0x{taw_db_type:04X}"
+                        )
+                    except Exception:
+                        pass
+
+                manifest_entries.append({
+                    "local_path": str(dest.relative_to(output_dir)),
+                    "destination": db_file.destination,
+                    "avdb_type": avdb.name,
+                    "avdb_type_id": avdb.type_id,   # needed for PUT /devices/installed-issues
+                    "series_id": s.series_id,
+                    "issue_name": target.name,
+                    "device_id": dev.device_id,     # needed for PUT /devices/installed-issues
+                    "removable_paths": issue_files.removable_paths,
+                    "unlock_codes": unlock_codes,
+                    "taw_database_type": taw_db_type,  # avionics type code; None for .jnx/.hif
+                })
+
+        # Write manifest so 'navdata install' knows destinations and cleanup paths
+        if manifest_entries:
+            import datetime
+            # Collect unique system IDs.  Prefer serials from the batch-update
+            # GET response (which includes the real hardware serial); fall back
+            # to whatever the aircraft list returned.
+            if batch_system_ids:
+                system_ids = batch_system_ids
+            else:
+                system_ids = list({
+                    dev.system_id_raw
+                    for dev, _, _, _ in plan
+                    if dev.system_id_raw is not None
+                })
+            # Determine the target avionics database_type via the /device-models/ API.
+            # Each device model has a productID that equals the TAW header database_type
+            # (= feat_unlk security_id).  Match the device name(s) in our plan against
+            # the device-models list to get the authoritative productID.
+            # Fall back to frequency heuristic if the API call fails or finds no match.
+            primary_db_type = None
+            device_type_map: dict = {}  # name → productID, for all devices in this plan
+            device_names = list({dev.name for dev, _, _, _ in plan if dev.name})
+            try:
+                device_models = api.list_device_models()
+                # Build name → productID map (case-insensitive)
+                model_map = {
+                    m["name"].lower(): m["productID"]
+                    for m in device_models
+                    if m.get("name") and m.get("productID") is not None
+                }
+                for dname in device_names:
+                    product_id = model_map.get(dname.lower())
+                    if product_id is not None:
+                        device_type_map[dname] = product_id
+                        if primary_db_type is None:
+                            primary_db_type = product_id
+                        click.echo(f"Device model '{dname}' → productID={product_id} (0x{product_id:04X})")
+                if primary_db_type is None and device_names:
+                    click.echo(f"Warning: device name(s) {device_names!r} not found in /device-models/ — falling back to frequency heuristic")
+            except Exception as e:
+                click.echo(f"Warning: /device-models/ lookup failed ({e}) — falling back to frequency heuristic")
+
+            if primary_db_type is None:
+                from collections import Counter
+                db_type_counts = Counter(
+                    e["taw_database_type"]
+                    for e in manifest_entries
+                    if e.get("taw_database_type") is not None
+                )
+                primary_db_type = db_type_counts.most_common(1)[0][0] if db_type_counts else None
+
+            manifest = {
+                "downloaded_at": datetime.datetime.now().isoformat(),
+                "aircraft": ac.tail_number,
+                "card_serial": card_serial,   # used by install to derive vol_id for feat_unlk.dat
+                "system_ids": system_ids,      # avionics hardware IDs for feat_unlk.dat
+                "batch_id": batch_id,          # used by install for PUT /devices/installed-issues
+                "device_database_type": primary_db_type,  # TAW db_type for this avionics unit
+                "device_type_map": device_type_map,        # name → productID for all devices
+                "entries": manifest_entries,
+            }
+            manifest_path = output_dir / "navdata_manifest.json"
+            with open(manifest_path, "w") as f:
+                json.dump(manifest, f, indent=2)
+            click.echo(f"\nManifest saved: {manifest_path}")
+
         click.echo(f"\nDownloaded {len(downloaded)} file(s) to {output_dir}")
         if downloaded:
-            click.echo("Run 'avcardtool navdata install' to write to your SD card.")
+            click.echo("Run 'avcardtool navdata install <SD_CARD_PATH>' to write to your SD card.")
 
     except GarminAPIError as e:
         click.echo(f"API error: {e}", err=True)
@@ -915,41 +1025,1135 @@ def navdata_download(ctx, aircraft: int, device: Optional[int], series: Optional
         sys.exit(1)
 
 
+# ---------------------------------------------------------------------------
+# feat_unlk.dat CRC reader
+# ---------------------------------------------------------------------------
+
+# Maps flyGarmin avdb type name → feat_unlk Feature name
+_AVDB_TO_FEAT_UNLK: dict = {
+    "NavData":           "NAVIGATION",
+    "Terrain":           "TERRAIN",
+    "Obstacle":          "OBSTACLE",
+    "SafeTaxi":          "SAFETAXI",
+    "ChartView":         "FLITE_CHARTS",
+    "Basemap":           "BASEMAP",
+    "Airport Directory": "AIRPORT_DIR",
+    "Sectionals":        "SECTIONALS",
+}
+
+
+def _read_feat_unlk_crcs(sd_card: Path) -> dict:
+    """
+    Return the database file CRC stored in each feat_unlk.dat slot.
+
+    feat_unlk.dat records the Garmin CRC-32 of the installed database file.
+    If the CRC for a freshly downloaded file matches the stored value the card
+    already has that exact version and the install can be skipped.
+
+    Returns {Feature.name: crc_int} — zero-valued (blank/uninitialised) CRCs
+    are excluded.
+    """
+    from avcardtool.navdata.garmin.feat_unlk import Feature
+
+    path = sd_card / "feat_unlk.dat"
+    if not path.exists():
+        return {}
+
+    crcs: dict = {}
+    try:
+        with open(path, "rb") as f:
+            for feature in Feature:
+                # CONTENT1 layout within the slot:
+                #   0-1   MAGIC1
+                #   2-3   security_id delta
+                #   4-7   MAGIC2
+                #   8-11  feature_bit
+                #  12-15  reserved
+                #  16-19  encoded_vol_id
+                #  20-21  MAGIC3 (NAVIGATION only)
+                #  20/22  file_CRC (4 bytes LE)
+                crc_offset = 22 if feature == Feature.NAVIGATION else 20
+                f.seek(feature.offset + crc_offset)
+                raw = f.read(4)
+                if len(raw) == 4:
+                    crc = int.from_bytes(raw, "little")
+                    if crc:
+                        crcs[feature.name] = crc
+    except OSError:
+        pass
+    return crcs
+
+
+def _extract_taw_crcs(taw_path: Path) -> dict:
+    """
+    Read the database file CRC embedded at the end of each region in a TAW.
+
+    flyGarmin TAW regions are typically stored raw (uncompressed).  The last
+    4 bytes of each region are the Garmin CRC-32 of that database file — the
+    same value that feat_unlk.dat stores.  Returns {Feature.name: crc_int}.
+
+    For the rare compressed region the fast-path value will be wrong; the
+    CRC comparison in auto-update will then fall through to a full install,
+    which is harmless.
+    """
+    from avcardtool.navdata.garmin.taw_parser import TAWParser, TAW_REGION_PATHS
+    from avcardtool.navdata.garmin.feat_unlk import FILENAME_TO_FEATURE
+
+    crcs: dict = {}
+    try:
+        taw_info = TAWParser().parse(taw_path)
+        with open(taw_path, "rb") as f:
+            for region in taw_info.regions:
+                dest = TAW_REGION_PATHS.get(region.region_type)
+                if not dest:
+                    continue
+                feature = FILENAME_TO_FEATURE.get(dest)
+                if not feature or region.compressed_size < 4:
+                    continue
+                f.seek(region.offset + region.compressed_size - 4)
+                raw = f.read(4)
+                if len(raw) == 4:
+                    crc = int.from_bytes(raw, "little")
+                    if crc:
+                        crcs[feature.name] = crc
+    except Exception:
+        pass
+    return crcs
+
+
+# ---------------------------------------------------------------------------
+# Shared download cache helpers
+# ---------------------------------------------------------------------------
+
+_DL_STATE_FILE = "download_state.json"
+_DL_LOCK_FILE  = "download_state.lock"
+
+
+def _is_pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _read_dl_state(cache_dir: Path) -> dict:
+    p = cache_dir / _DL_STATE_FILE
+    if p.exists():
+        try:
+            return json.loads(p.read_text())
+        except Exception:
+            pass
+    return {}
+
+
+def _write_dl_state(cache_dir: Path, state: dict) -> None:
+    (cache_dir / _DL_STATE_FILE).write_text(json.dumps(state, indent=2))
+
+
+def _acquire_dl_slot(cache_dir: Path, key: str) -> str:
+    """
+    Try to claim the download slot for *key* in the shared cache.
+
+    Returns:
+        "mine"   — slot acquired; caller must download then call _release_dl_slot
+        "cached" — a previous run completed this download; reuse the files
+        "wait"   — another live process is currently downloading this key
+    """
+    import fcntl
+
+    with open(cache_dir / _DL_LOCK_FILE, "w") as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)
+        state = _read_dl_state(cache_dir)
+        entry = state.get(key, {})
+
+        if entry.get("status") == "complete":
+            return "cached"
+
+        if entry.get("status") == "downloading":
+            pid = entry.get("pid", 0)
+            if pid and _is_pid_alive(pid):
+                return "wait"
+            # Stale entry from a crashed process — take it over
+
+        state[key] = {"status": "downloading", "pid": os.getpid(), "files": [], "feature_crcs": {}}
+        _write_dl_state(cache_dir, state)
+        return "mine"
+
+
+def _release_dl_slot(
+    cache_dir: Path,
+    key: str,
+    files: list,          # [{"cache_path": str, "destination": ..., "taw_database_type": ...}]
+    feature_crcs: dict,
+    removable_paths: list,
+    avdb_type_id: int,
+    series_id: int,
+    success: bool,
+) -> None:
+    """Mark the download slot complete (or remove it on failure so the next run retries)."""
+    import fcntl
+
+    with open(cache_dir / _DL_LOCK_FILE, "w") as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)
+        state = _read_dl_state(cache_dir)
+        if success:
+            state[key] = {
+                "status": "complete",
+                "pid": os.getpid(),
+                "files": files,
+                "feature_crcs": feature_crcs,
+                "removable_paths": removable_paths,
+                "avdb_type_id": avdb_type_id,
+                "series_id": series_id,
+            }
+        else:
+            state.pop(key, None)
+        _write_dl_state(cache_dir, state)
+
+
+def _link_or_copy(src: Path, dst: Path) -> None:
+    """Hardlink src → dst within the same filesystem, copy otherwise."""
+    import shutil as _shutil
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if dst.exists():
+        return
+    try:
+        os.link(src, dst)
+    except OSError:
+        _shutil.copy2(src, dst)
+
+
+def _resolve_target_db_type(sd_card: Path, manifest: dict) -> Optional[int]:
+    """
+    Determine which avionics database_type (= TAW database_type = feat_unlk security_id)
+    to use when installing to *sd_card*.
+
+    Resolution order:
+      1. avionics.txt at SD card root — content is the avionics name (e.g. "G3X Touch").
+         Looked up in manifest's device_type_map (populated during download from
+         the /device-models/ API).
+      2. Existing feat_unlk.dat on the card — the NAVIGATION slot stores the
+         security_id at bytes 2-3; recover it as int.from_bytes + SEC_ID_OFFSET.
+      3. Manifest has exactly one distinct db_type — unambiguous, use it.
+      4. Return None — caller must error and tell the user to create avionics.txt.
+    """
+    from avcardtool.navdata.garmin.feat_unlk import SEC_ID_OFFSET, Feature
+
+    # --- 1. avionics.txt ---
+    avionics_file = sd_card / "avionics.txt"
+    if avionics_file.exists():
+        try:
+            avionics_name = avionics_file.read_text(encoding="utf-8").strip()
+            device_type_map: dict = manifest.get("device_type_map", {})
+            # Case-insensitive lookup
+            name_lower = avionics_name.lower()
+            for map_name, product_id in device_type_map.items():
+                if map_name.lower() == name_lower:
+                    click.echo(f"avionics.txt: '{avionics_name}' → db_type=0x{product_id:04X}")
+                    return product_id
+            click.echo(
+                f"Warning: avionics.txt says '{avionics_name}' but that name is not in "
+                f"the manifest's device_type_map {list(device_type_map.keys())} — "
+                f"ignoring avionics.txt"
+            )
+        except Exception as e:
+            click.echo(f"Warning: could not read avionics.txt ({e}) — ignoring")
+
+    # --- 2. Existing feat_unlk.dat ---
+    feat_unlk_path = sd_card / "feat_unlk.dat"
+    if feat_unlk_path.exists():
+        try:
+            nav_offset = Feature.NAVIGATION.offset
+            with open(feat_unlk_path, "rb") as f:
+                f.seek(nav_offset + 2)
+                raw = f.read(2)
+            if len(raw) == 2:
+                stored = int.from_bytes(raw, "little")
+                security_id = (stored + SEC_ID_OFFSET) & 0xFFFF
+                click.echo(
+                    f"feat_unlk.dat: NAVIGATION slot security_id=0x{security_id:04X} "
+                    f"→ using as target db_type"
+                )
+                return security_id
+        except Exception as e:
+            click.echo(f"Warning: could not read feat_unlk.dat ({e})")
+
+    # --- 3. Single distinct db_type in manifest ---
+    distinct = {
+        e["taw_database_type"]
+        for e in manifest.get("entries", [])
+        if e.get("taw_database_type") is not None
+    }
+    if len(distinct) == 1:
+        db_type = next(iter(distinct))
+        click.echo(f"Single avionics db_type in manifest: 0x{db_type:04X}")
+        return db_type
+
+    return None
+
+
 @navdata.command('install')
-@click.argument(
-    'taw_file',
-    type=click.Path(exists=True, path_type=Path)
-)
 @click.argument(
     'sd_card',
     type=click.Path(path_type=Path),
-    required=False
+    required=False,
 )
-@click.option('--yes', '-y', is_flag=True, help='Skip confirmation')
+@click.option(
+    '--from', 'from_dir',
+    type=click.Path(exists=True, path_type=Path),
+    default=None,
+    help='Download directory containing navdata_manifest.json (default: data_dir/navdata/)',
+)
+@click.option('--yes', '-y', is_flag=True, help='Skip confirmation prompt')
 @click.pass_context
-def navdata_install(ctx, taw_file: Path, sd_card: Optional[Path], yes: bool):
+def navdata_install(ctx, sd_card: Optional[Path], from_dir: Optional[Path], yes: bool):
     """
-    Install database to SD card.
+    Install downloaded databases to the SD card.
 
-    If SD_CARD is not provided, attempts to auto-detect.
+    SD_CARD is the mount point of the card (e.g. /mnt/sdcard or M:\\ on Windows).
+    If omitted, auto-detection is attempted (Linux only).
+
+    Reads navdata_manifest.json written by 'navdata download' to know which
+    files go where and which old files to remove first.
     """
-    click.echo(f"Would install: {taw_file}")
-    if sd_card:
-        click.echo(f"To: {sd_card}")
+    from avcardtool.navdata.garmin.taw_parser import TAWExtractor, TAWParseError
+    import shutil
+
+    cfg = ctx.obj['config']
+    download_dir = from_dir or (Path(cfg.system.data_dir) / "navdata")
+
+    # ---------------------------------------------------------------
+    # Load manifest
+    # ---------------------------------------------------------------
+    manifest_path = download_dir / "navdata_manifest.json"
+    if not manifest_path.exists():
+        click.echo(f"No manifest found at {manifest_path}.", err=True)
+        click.echo("Run 'avcardtool navdata download' first.", err=True)
+        sys.exit(1)
+
+    with open(manifest_path) as f:
+        manifest = json.load(f)
+
+    entries = manifest.get("entries", [])
+    if not entries:
+        click.echo("Manifest is empty — nothing to install.", err=True)
+        sys.exit(1)
+
+    # ---------------------------------------------------------------
+    # Resolve SD card path
+    # ---------------------------------------------------------------
+    if sd_card is None:
+        try:
+            from avcardtool.navdata.sdcard import SDCardDetector
+            cards = SDCardDetector().scan_for_cards()
+            garmin_cards = [c for c in cards if c.is_garmin and c.mount_point]
+            if garmin_cards:
+                sd_card = Path(garmin_cards[0].mount_point)
+                click.echo(f"Auto-detected SD card: {sd_card}")
+            elif cards and cards[0].mount_point:
+                sd_card = Path(cards[0].mount_point)
+                click.echo(f"Auto-detected card (not Garmin-formatted): {sd_card}")
+        except Exception:
+            pass
+
+    if sd_card is None:
+        click.echo("No SD card found. Specify the mount point as an argument.", err=True)
+        sys.exit(1)
+
+    if not sd_card.exists():
+        click.echo(f"SD card path does not exist: {sd_card}", err=True)
+        sys.exit(1)
+
+    # ---------------------------------------------------------------
+    # Summary and confirmation
+    # ---------------------------------------------------------------
+    avdb_types = sorted({e["avdb_type"] for e in entries})
+    removable = sorted({p for e in entries for p in e.get("removable_paths", [])})
+
+    click.echo(f"\nDownload directory : {download_dir}")
+    click.echo(f"SD card            : {sd_card}")
+    click.echo(f"Databases          : {', '.join(avdb_types)}")
+    click.echo(f"Files to install   : {len(entries)}")
+    if removable:
+        click.echo(f"Old files to remove: {len(removable)}")
+
+    if not yes:
+        click.confirm("\nProceed with installation?", abort=True)
+
+    # ---------------------------------------------------------------
+    # Step 1: Remove old files listed in removablePaths
+    # ---------------------------------------------------------------
+    if removable:
+        click.echo("\nRemoving old database files...")
+        for rel_path in removable:
+            # Strip leading slash: API returns "/fbo.gpi", Path("/fbo.gpi") is absolute
+            clean = rel_path.replace("\\", "/").lstrip("/")
+            target = sd_card / clean
+            # Guard against path traversal
+            try:
+                target.resolve().relative_to(sd_card.resolve())
+            except ValueError:
+                click.echo(f"  Skipping unsafe path: {rel_path}", err=True)
+                continue
+            if target.exists():
+                if target.is_dir():
+                    shutil.rmtree(target)
+                else:
+                    target.unlink()
+                click.echo(f"  Removed: {clean}")
+
+    # ---------------------------------------------------------------
+    # Step 2: Install each file
+    # ---------------------------------------------------------------
+    extractor = TAWExtractor()
+    installed_files = []
+    errors = []
+    # Maps str(installed_file_path) → security_id (TAW database_type)
+    # so Step 3 can look up the correct security_id per extracted file.
+    _extracted_security_ids: dict[str, int] = {}
+
+    # Determine which avionics unit this card belongs to.
+    # Required when a subscription covers multiple avionics (e.g. G3X Touch + GTN 6XX)
+    # so we only extract TAW files for the correct unit.
+    click.echo("\nResolving target avionics type...")
+    target_db_type: Optional[int] = _resolve_target_db_type(sd_card, manifest)
+    if target_db_type is None:
+        device_type_map = manifest.get("device_type_map", {})
+        if device_type_map:
+            names = ", ".join(f"'{n}'" for n in device_type_map)
+            click.echo(
+                f"Cannot determine which avionics this card belongs to.\n"
+                f"Create a file named 'avionics.txt' in the SD card root containing "
+                f"exactly one of: {names}",
+                err=True,
+            )
+        else:
+            click.echo(
+                "Cannot determine avionics type — no device_type_map in manifest.\n"
+                "Re-run 'avcardtool navdata download' to refresh the manifest.",
+                err=True,
+            )
+        sys.exit(1)
+    click.echo(f"Target avionics db_type: 0x{target_db_type:04X}")
+
+    click.echo(f"\nInstalling {len(entries)} file(s)...")
+
+    for entry in entries:
+        local_path = download_dir / entry["local_path"]
+        destination = entry.get("destination")  # relative path on SD card, or None
+        avdb_type = entry["avdb_type"]
+
+        if not local_path.exists():
+            click.echo(f"  Missing: {local_path.name} — skipping")
+            errors.append(f"Missing local file: {local_path}")
+            continue
+
+        suffix = local_path.suffix.lower()
+
+        # Skip TAW files intended for a different avionics unit.
+        if suffix == ".taw" and target_db_type is not None:
+            entry_db_type = entry.get("taw_database_type")
+            if entry_db_type is not None and entry_db_type != target_db_type:
+                click.echo(
+                    f"  Skipping {local_path.name} "
+                    f"(db_type=0x{entry_db_type:04X}, not for this avionics)"
+                )
+                continue
+
+        if suffix == ".taw":
+            # Extract TAW archive — files go to paths determined by region headers.
+            # Parse the header first to get security_id (database_type), which is
+            # needed later when writing feat_unlk.dat.
+            click.echo(f"  Extracting {local_path.name}  ({avdb_type})")
+            try:
+                taw_info = extractor.list_contents(local_path)
+                security_id = taw_info.header.database_type
+                extracted = extractor.extract_to_directory(
+                    local_path, sd_card, preserve_paths=True, overwrite=True
+                )
+                for f in extracted:
+                    click.echo(f"    → {f.relative_to(sd_card)}")
+                    installed_files.append(f)
+                    _extracted_security_ids[str(f)] = security_id
+            except TAWParseError as e:
+                click.echo(f"  Error extracting {local_path.name}: {e}", err=True)
+                errors.append(str(e))
+
+        elif suffix in (".jnx", ".hif"):
+            # Copy directly to destination path from API, or infer from filename
+            if destination:
+                dest_path = sd_card / Path(destination.replace("\\", "/"))
+            else:
+                # Fallback: infer from filename for known raster types
+                name = local_path.name
+                if name.startswith("SECT_"):
+                    dest_path = sd_card / "rasters" / "SECT" / name
+                elif name.startswith("HI_"):
+                    dest_path = sd_card / "rasters" / "HI" / name
+                elif name.startswith("LO_"):
+                    dest_path = sd_card / "rasters" / "LO" / name
+                elif name.startswith("HELI_"):
+                    dest_path = sd_card / "rasters" / "HELI" / name
+                elif suffix == ".hif":
+                    dest_path = sd_card / "rasters" / name
+                else:
+                    dest_path = sd_card / name
+
+            click.echo(f"  Copying  {local_path.name}  → {dest_path.relative_to(sd_card)}")
+            dest_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(local_path, dest_path)
+            from avcardtool.navdata.garmin.taw_parser import _set_hidden
+            _set_hidden(dest_path)
+            installed_files.append(dest_path)
+
+        else:
+            click.echo(f"  Unknown file type {suffix}, skipping: {local_path.name}", err=True)
+
+    # ---------------------------------------------------------------
+    # Step 3: feat_unlk.dat + .evidf.dat
+    #
+    # feat_unlk.dat is a copy-protection file.  Each database type
+    # occupies a fixed 913-byte slot at a predetermined offset.  Each
+    # slot contains the encoded FAT32 volume serial, the database
+    # file's embedded CRC, and the truncated avionics system ID.
+    # See src/avcardtool/navdata/garmin/feat_unlk.py for details.
+    #
+    # .evidf.dat is 4 bytes: encode_volume_id(vol_id) — exactly the
+    # same encoded serial stored in every feat_unlk.dat slot.  Garmin
+    # Aviation Database Manager writes it on every scan/install.
+    # ---------------------------------------------------------------
+    from avcardtool.navdata.garmin.feat_unlk import (
+        write_feat_unlk_for_file, vol_id_from_card_serial,
+        get_vol_id_from_sd_card, encode_volume_id,
+    )
+    from avcardtool.navdata.garmin.taw_parser import _set_hidden as _set_hidden_attr
+
+    # Resolve vol_id: prefer manifest card_serial (used at download time),
+    # fall back to reading from the mounted block device.
+    vol_id: Optional[int] = vol_id_from_card_serial(manifest.get("card_serial", ""))
+    if vol_id is None:
+        vol_id = get_vol_id_from_sd_card(sd_card)
+    if vol_id is None:
+        click.echo("\nWarning: cannot determine SD card volume serial — "
+                   "feat_unlk.dat and .evidf.dat will not be written.", err=True)
     else:
-        click.echo("Auto-detecting SD card...")
+        # Use the first system_id available (typically one device per aircraft)
+        system_ids = manifest.get("system_ids", [])
+        system_id: int = system_ids[0] if system_ids else 0
+
+        feat_unlk_count = 0
+        for installed_file in installed_files:
+            # security_id comes from the TAW header (database_type field).
+            # We stored it per-entry when building extracted_security_ids above.
+            entry_sec_id = _extracted_security_ids.get(str(installed_file), 0)
+            if write_feat_unlk_for_file(sd_card, installed_file, vol_id,
+                                        entry_sec_id, system_id):
+                feat_unlk_count += 1
+
+        if feat_unlk_count:
+            _set_hidden_attr(sd_card / "feat_unlk.dat")
+            click.echo(f"\nUpdated feat_unlk.dat  ({feat_unlk_count} feature slot(s))")
+
+        # .evidf.dat — 4 bytes: encoded volume serial (same value embedded in
+        # every feat_unlk.dat slot).  Written by GADM on every scan/install.
+        evidf_path = sd_card / ".evidf.dat"
+        try:
+            evidf_path.write_bytes(encode_volume_id(vol_id).to_bytes(4, 'little'))
+            _set_hidden_attr(evidf_path)
+            click.echo(f"Updated .evidf.dat  (0x{encode_volume_id(vol_id):08X})")
+        except Exception as e:
+            click.echo(f"Warning: could not write .evidf.dat: {e}", err=True)
+
+    # ---------------------------------------------------------------
+    # Step 4: Update GarminDevice.xml version entries
+    # ---------------------------------------------------------------
+
+    garmin_device_xml = sd_card / "Garmin" / "GarminDevice.xml"
+    if garmin_device_xml.exists() and installed_files:
+        try:
+            _update_garmin_device_xml(garmin_device_xml, manifest)
+            click.echo("\nUpdated GarminDevice.xml")
+        except Exception as e:
+            click.echo(f"\nWarning: could not update GarminDevice.xml: {e}", err=True)
+
+    # ---------------------------------------------------------------
+    # Step 5: Write .gadm.meta
+    # Garmin Aviation Database Manager writes this hidden JSON file
+    # to track which account/device last updated the card.
+    # ---------------------------------------------------------------
+    gadm_meta_path = sd_card / ".gadm.meta"
+    try:
+        import datetime as _dt
+
+        # Preserve existing fields (tail number, account) if already present
+        existing_gadm: dict = {}
+        if gadm_meta_path.exists():
+            try:
+                existing_gadm = json.loads(gadm_meta_path.read_text())
+            except Exception:
+                pass
+
+        # Pull account info from Garmin auth tokens if available
+        garmin_account = existing_gadm.get("garminAccount", "")
+        tail_number = existing_gadm.get("gadmTailNumber", manifest.get("aircraft", ""))
+        try:
+            from avcardtool.navdata.garmin.auth import GarminAuth
+            _auth = GarminAuth(token_dir=Path(cfg.system.data_dir))
+            if _auth.tokens.display_name:
+                garmin_account = _auth.tokens.display_name
+        except Exception:
+            pass
+
+        gadm = {
+            "id": existing_gadm.get("id") or __import__("uuid").uuid4().hex,
+            "garminAccount": garmin_account,
+            "gadmLastInstalled": _dt.datetime.now().strftime(
+                "%a %b %d %Y %H:%M:%S GMT+0000 (Coordinated Universal Time)"
+            ),
+            "gadmAvionicsName": existing_gadm.get("gadmAvionicsName", "G3X Touch"),
+            "gadmCardDescription": existing_gadm.get("gadmCardDescription"),
+            "gadmTailNumber": tail_number,
+            "gadmFleetMetadata": existing_gadm.get("gadmFleetMetadata"),
+        }
+        gadm_meta_path.write_text(json.dumps(gadm))
+        click.echo("Updated .gadm.meta")
+    except Exception as e:
+        click.echo(f"Warning: could not update .gadm.meta: {e}", err=True)
+
+    # ---------------------------------------------------------------
+    # Step 6: Report installed issues to flyGarmin
+    #
+    # PUT /devices/installed-issues tells the server which cycles are
+    # now on the card so fly.garmin.com shows the correct status and
+    # subscription tracking stays up to date.  Uses the same BatchUpdate
+    # session that was created during download.
+    # ---------------------------------------------------------------
+    batch_id = manifest.get("batch_id")
+    if batch_id and installed_files:
+        try:
+            from avcardtool.navdata.garmin.auth import GarminAuth
+            from avcardtool.navdata.garmin.api import FlyGarminAPI
+            _auth = GarminAuth(token_dir=Path(cfg.system.data_dir))
+            _api = FlyGarminAPI(_auth)
+
+            import datetime as _dt2
+            now_iso = _dt2.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+            # Deduplicate: one report per unique (device_id, series_id, issue_name)
+            seen: set = set()
+            installations = []
+            for entry in entries:
+                key = (entry.get("device_id"), entry.get("series_id"), entry["issue_name"])
+                if key not in seen:
+                    seen.add(key)
+                    installations.append({
+                        "name": entry["issue_name"],
+                        "seriesID": entry["series_id"],
+                        "installedAt": now_iso,
+                        "avdbTypeID": entry.get("avdb_type_id", 0),
+                        "deviceID": entry.get("device_id", 0),
+                    })
+
+            _api.report_installed_issues(installations, batch_id)
+            click.echo(f"Reported {len(installations)} installed issue(s) to fly.garmin.com")
+        except Exception as e:
+            click.echo(f"Warning: could not report to fly.garmin.com: {e}", err=True)
+
+    # ---------------------------------------------------------------
+    # Write cycle tracking file for auto-update
+    # ---------------------------------------------------------------
+    # .navdata_cycles.json lets 'navdata auto-update' know what is already
+    # on the card so it can skip databases that are already current.
+    if installed_files:
+        try:
+            import datetime as _dt3
+            cycle_map = {}
+            for entry in entries:
+                avdb_type = entry.get("avdb_type", "")
+                issue_name = entry.get("issue_name", "")
+                series_id = entry.get("series_id")
+                if avdb_type and issue_name:
+                    cycle_map[avdb_type] = {"issue": issue_name, "series_id": series_id}
+            if cycle_map:
+                (sd_card / ".navdata_cycles.json").write_text(
+                    json.dumps({"updated_at": _dt3.datetime.now().isoformat(), "cycles": cycle_map}, indent=2)
+                )
+        except Exception as e:
+            click.echo(f"Warning: could not write .navdata_cycles.json: {e}", err=True)
+
+    # ---------------------------------------------------------------
+    # Done
+    # ---------------------------------------------------------------
+    if errors:
+        click.echo(f"\nCompleted with {len(errors)} error(s):")
+        for e in errors:
+            click.echo(f"  {e}", err=True)
+    else:
+        click.echo(f"\nInstalled {len(installed_files)} file(s) to {sd_card}")
+
+
+def _update_garmin_device_xml(xml_path: Path, manifest: dict) -> None:
+    """
+    Update <UpdateFile> version entries in GarminDevice.xml for each
+    installed database.  Garmin's client does this after every install;
+    the G3X reads the file to show database currency on the avionics page.
+
+    Version encoding observed on a real card:
+        cycle "20T1"  → <Major>20</Major><Minor>1</Minor>
+        cycle "26B2"  → <Major>26</Major><Minor>2</Minor>
+        cycle "2603"  → <Major>26</Major><Minor>3</Minor>
+    i.e. Major = first two digits; Minor = trailing numeric digits.
+    """
+    import re
+    import xml.etree.ElementTree as ET
+
+    # Part-number prefixes known to map to each avdb type
+    # (derived from observed GarminDevice.xml entries)
+    AVDB_PART_PREFIXES = {
+        "NavData":   ["006-D0600", "006-D1159"],
+        "Terrain":   ["006-D0678"],
+        "Obstacle":  ["006-D0123"],
+        "SafeTaxi":  ["006-D0680"],
+        "ChartView": ["006-D3497"],
+    }
+
+    # Parse cycle string into Major/Minor
+    def _parse_cycle(cycle: str):
+        # Strip leading letters (e.g. "20T1" → year=20, minor=1)
+        # Keep trailing digits as Minor; leading digits as Major
+        m = re.match(r'^(\d+)\D*(\d+)$', cycle)
+        if m:
+            return int(m.group(1)), int(m.group(2))
+        m = re.match(r'^(\d{2})(\d{2})$', cycle)  # plain "2603"
+        if m:
+            return int(m.group(1)), int(m.group(2))
+        return None, None
+
+    # Build a mapping: avdb_type → (major, minor) from manifest entries
+    type_versions: dict = {}
+    for entry in manifest.get("entries", []):
+        avdb_type = entry.get("avdb_type", "")
+        issue_name = entry.get("issue_name", "")
+        major, minor = _parse_cycle(issue_name)
+        if major is not None and avdb_type not in type_versions:
+            type_versions[avdb_type] = (major, minor)
+
+    if not type_versions:
+        return
+
+    # Parse XML preserving the original text as much as possible
+    ET.register_namespace("", "http://www.garmin.com/xmlschemas/GarminDevice/v2")
+    ET.register_namespace("xsi", "http://www.w3.org/2001/XMLSchema-instance")
+    tree = ET.parse(xml_path)
+    root = tree.getroot()
+
+    ns = {"gd": "http://www.garmin.com/xmlschemas/GarminDevice/v2"}
+
+    for update_file in root.findall(".//gd:UpdateFile", ns):
+        pn_el = update_file.find("gd:PartNumber", ns)
+        if pn_el is None:
+            continue
+        part_number = pn_el.text or ""
+
+        for avdb_type, prefixes in AVDB_PART_PREFIXES.items():
+            if any(part_number.startswith(p) for p in prefixes):
+                if avdb_type not in type_versions:
+                    continue
+                major, minor = type_versions[avdb_type]
+                ver_el = update_file.find("gd:Version", ns)
+                if ver_el is not None:
+                    maj_el = ver_el.find("gd:Major", ns)
+                    min_el = ver_el.find("gd:Minor", ns)
+                    if maj_el is not None:
+                        maj_el.text = str(major)
+                    if min_el is not None:
+                        min_el.text = str(minor)
+                # Remove <Description>Missing</Description> if present
+                desc_el = update_file.find("gd:Description", ns)
+                if desc_el is not None and desc_el.text == "Missing":
+                    update_file.remove(desc_el)
+                break
+
+    tree.write(xml_path, encoding="UTF-8", xml_declaration=True)
 
 
 @navdata.command('auto-update')
-@click.option('--device', '-d', type=click.Path(path_type=Path), help='Device path')
+@click.argument('device', type=click.Path(path_type=Path), required=False)
 @click.pass_context
 def navdata_auto_update(ctx, device: Optional[Path]):
     """
-    Automatically download latest databases and install to SD card.
+    Silently update all inserted SD cards with latest navigation databases.
 
-    This is the all-in-one command for complete database updates.
+    DEVICE: block device path (e.g. /dev/sda1).  If omitted, every mounted
+    FAT32 card is scanned.
+
+    Designed for unattended use — no prompts, all output goes to stdout/stderr
+    for capture by journald.  Typically invoked by the avcardtool-navdata@.service
+    systemd unit when a card is inserted.
+
+    For each card:
+      1. Resolves which avionics it belongs to (avionics.txt → feat_unlk.dat →
+         single-device fallback).
+      2. Reads .navdata_cycles.json to know what is already installed.
+      3. Downloads the current cycle (if the card is expired/behind) AND the
+         next upcoming cycle (if already available on the server).
+      4. Installs to the card and writes updated .navdata_cycles.json.
     """
-    click.echo("Automatic database update functionality coming soon...")
+    import datetime
+    import logging as _logging
+
+    _log = _logging.getLogger("avcardtool.navdata.auto_update")
+
+    cfg = ctx.obj['config']
+    data_dir = Path(cfg.system.data_dir)
+
+    from avcardtool.navdata.garmin.auth import GarminAuth, GarminAPIError
+    from avcardtool.navdata.garmin.api import FlyGarminAPI, BatchDatabase
+    from avcardtool.navdata.garmin.taw_parser import TAWParser
+    from avcardtool.navdata.sdcard import SDCardDetector
+
+    # ---------------------------------------------------------------
+    # Authenticate
+    # ---------------------------------------------------------------
+    auth = GarminAuth(token_dir=data_dir)
+    if not auth.ensure_authenticated():
+        _log.error("Not authenticated. Run 'avcardtool navdata login' first.")
+        sys.exit(1)
+
+    api = FlyGarminAPI(auth)
+
+    # ---------------------------------------------------------------
+    # Fetch aircraft + device-models (shared across all cards)
+    # ---------------------------------------------------------------
+    try:
+        aircraft_list = api.list_aircraft()
+    except GarminAPIError as e:
+        _log.error(f"Could not fetch aircraft list: {e}")
+        sys.exit(1)
+
+    if not aircraft_list:
+        _log.error("No aircraft found on this account.")
+        sys.exit(1)
+
+    ac = aircraft_list[0]
+
+    try:
+        device_models = api.list_device_models()
+        model_map = {
+            m["name"].lower(): m["productID"]
+            for m in device_models
+            if m.get("name") and m.get("productID") is not None
+        }
+    except Exception as e:
+        _log.warning(f"Could not fetch device models: {e}")
+        model_map = {}
+
+    device_type_map: dict = {}
+    for dev in ac.devices:
+        product_id = model_map.get(dev.name.lower())
+        if product_id is not None:
+            device_type_map[dev.name] = product_id
+
+    # ---------------------------------------------------------------
+    # Find SD cards
+    # ---------------------------------------------------------------
+    detector = SDCardDetector()
+    _we_mounted: Optional[str] = None
+
+    if device:
+        all_cards = detector.scan_for_cards()
+        cards = [c for c in all_cards if c.device_path == str(device)]
+        if not cards:
+            # Not yet mounted — wait briefly for udisks, then try ourselves
+            import time as _time
+            _time.sleep(2)
+            all_cards = detector.scan_for_cards()
+            cards = [c for c in all_cards if c.device_path == str(device)]
+        if not cards:
+            try:
+                _we_mounted = detector.mount_card(str(device))
+                all_cards = detector.scan_for_cards()
+                cards = [c for c in all_cards if c.device_path == str(device)]
+            except Exception as e:
+                _log.error(f"Could not mount {device}: {e}")
+                sys.exit(1)
+    else:
+        cards = detector.scan_for_cards()
+
+    if not cards:
+        _log.info("No SD cards found.")
+        return
+
+    # ---------------------------------------------------------------
+    # Process each card
+    # ---------------------------------------------------------------
+    for card in cards:
+        if not card.mount_point:
+            _log.info(f"Skipping {card.device_path}: not mounted")
+            continue
+
+        mount = Path(card.mount_point)
+        _log.info(f"Processing card: {mount}  serial={card.volume_id}")
+
+        # --- Resolve avionics type ---
+        # Build a synthetic manifest so _resolve_target_db_type can do its checks.
+        # Entries cover all known avionics so feat_unlk.dat fallback has a full
+        # set of db_types to cross-reference against.
+        mock_manifest = {
+            "device_type_map": device_type_map,
+            "entries": [{"taw_database_type": pid} for pid in device_type_map.values()],
+        }
+        target_db_type = _resolve_target_db_type(mount, mock_manifest)
+        if target_db_type is None:
+            _log.warning(
+                f"  Cannot determine avionics for {mount}. "
+                f"Create avionics.txt with one of: {list(device_type_map.keys())}"
+            )
+            continue
+
+        target_dev = next(
+            (d for d in ac.devices if device_type_map.get(d.name) == target_db_type),
+            None,
+        )
+        if target_dev is None:
+            _log.warning(f"  db_type=0x{target_db_type:04X} matched no registered device — skipping")
+            continue
+
+        _log.info(f"  Avionics: {target_dev.name}")
+
+        # --- Read what is currently on the card ---
+        installed_cycles: dict = {}
+        cycles_file = mount / ".navdata_cycles.json"
+        if cycles_file.exists():
+            try:
+                installed_cycles = json.loads(cycles_file.read_text()).get("cycles", {})
+                _log.info(f"  Installed: {installed_cycles}")
+            except Exception as e:
+                _log.warning(f"  Could not read .navdata_cycles.json: {e}")
+
+        # --- Select which issues to download ---
+        # current: latest installable, if different from what is on the card.
+        # next:    first issue in available_issues that is not yet installable
+        #          (upcoming cycle, pre-download).
+        plan = []  # [(avdb, series, issue)]
+        for avdb in target_dev.avdb_types:
+            installed_issue = installed_cycles.get(avdb.name, {}).get("issue")
+            for s in avdb.series:
+                installable_names = {i.name for i in s.installable_issues}
+
+                if s.installable_issues:
+                    current = s.installable_issues[0]
+                    if current.name != installed_issue:
+                        _log.info(f"  {avdb.name}: need current {current.name} (have {installed_issue or 'none'})")
+                        plan.append((avdb, s, current))
+
+                for issue in s.available_issues:
+                    if issue.name not in installable_names:
+                        if issue.name != installed_issue:
+                            _log.info(f"  {avdb.name}: pre-downloading next cycle {issue.name}")
+                            plan.append((avdb, s, issue))
+                        break  # only the earliest upcoming cycle
+
+        if not plan:
+            _log.info(f"  All databases current — nothing to do.")
+            continue
+
+        # ---------------------------------------------------------------
+        # Download with shared cache + coordination
+        # ---------------------------------------------------------------
+        card_serial = card.volume_id or "0"
+        cache_dir = data_dir / "navdata" / "cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        card_dir  = data_dir / "navdata" / f"auto_{card_serial.replace('-', '')}"
+        card_dir.mkdir(parents=True, exist_ok=True)
+
+        # Read what the card already has (from feat_unlk.dat CRCs).
+        # These are compared against the CRCs stored per-issue in the
+        # download state to skip installs when the card is already current.
+        feat_unlk_crcs = _read_feat_unlk_crcs(mount)
+        if feat_unlk_crcs:
+            _log.info(f"  feat_unlk.dat CRCs: { {k: hex(v) for k, v in feat_unlk_crcs.items()} }")
+
+        # Create a batch session for the issues we plan to download.
+        batch_id = None
+        batch_system_ids: list = []
+        try:
+            batch_dbs = [
+                BatchDatabase(series_id=s.series_id, issue_name=issue.name, device_ids=[target_dev.device_id])
+                for _, s, issue in plan
+            ]
+            batch_id = api.create_batch_update(batch_dbs)
+            batch_plan = api.get_batch_update(batch_id)
+            batch_system_ids = [
+                int(d["serial"]) for d in batch_plan.get("devices", [])
+                if isinstance(d.get("serial"), int)
+            ]
+        except Exception as e:
+            _log.warning(f"  Batch session failed ({e}) — continuing without batch auth")
+
+        manifest_entries = []
+        import time as _time
+
+        for avdb, s, issue in plan:
+            cache_key = f"{avdb.name}/{issue.name}"
+            issue_cache_dir = cache_dir / avdb.name.replace(" ", "_") / issue.name
+
+            # --- Acquire download slot ---
+            slot = _acquire_dl_slot(cache_dir, cache_key)
+
+            if slot == "wait":
+                _log.info(f"  {cache_key}: another process is downloading, waiting...")
+                deadline = _time.time() + 1800
+                while _time.time() < deadline:
+                    _time.sleep(5)
+                    slot = _acquire_dl_slot(cache_dir, cache_key)
+                    if slot != "wait":
+                        break
+                if slot == "wait":
+                    _log.error(f"  {cache_key}: timed out waiting — skipping")
+                    continue
+
+            if slot == "cached":
+                _log.info(f"  {cache_key}: using cached download")
+                # Check if this card already has this exact version via feat_unlk CRC.
+                dl_state = _read_dl_state(cache_dir)
+                cached_crcs = dl_state.get(cache_key, {}).get("feature_crcs", {})
+                feat_name = _AVDB_TO_FEAT_UNLK.get(avdb.name)
+                if (feat_name
+                        and feat_unlk_crcs.get(feat_name)
+                        and cached_crcs.get(feat_name)
+                        and feat_unlk_crcs[feat_name] == cached_crcs[feat_name]):
+                    _log.info(
+                        f"  {avdb.name}/{issue.name}: feat_unlk CRC matches "
+                        f"(0x{feat_unlk_crcs[feat_name]:08X}) — already installed, skipping"
+                    )
+                    continue
+
+                # Hardlink cached files into this card's dir and rebuild manifest entries.
+                for file_entry in dl_state.get(cache_key, {}).get("files", []):
+                    src = cache_dir / file_entry["cache_path"]
+                    dst = card_dir / file_entry["cache_path"]
+                    _link_or_copy(src, dst)
+                    manifest_entries.append({
+                        "local_path": file_entry["cache_path"],
+                        "destination": file_entry["destination"],
+                        "avdb_type": avdb.name,
+                        "avdb_type_id": dl_state[cache_key].get("avdb_type_id", avdb.type_id),
+                        "series_id": dl_state[cache_key].get("series_id", s.series_id),
+                        "issue_name": issue.name,
+                        "device_id": target_dev.device_id,
+                        "removable_paths": dl_state[cache_key].get("removable_paths", []),
+                        "unlock_codes": [],
+                        "taw_database_type": file_entry.get("taw_database_type"),
+                    })
+                continue
+
+            # slot == "mine" — download now
+            try:
+                api.unlock(s.series_id, issue.name, target_dev.device_id, card_serial, batch_id=batch_id)
+            except Exception as e:
+                _log.warning(f"  Unlock failed for {cache_key}: {e}")
+
+            try:
+                issue_files = api.list_files(s.series_id, issue.name)
+            except Exception as e:
+                _log.error(f"  list_files failed for {cache_key}: {e}")
+                _release_dl_slot(cache_dir, cache_key, [], {}, [], avdb.type_id, s.series_id, success=False)
+                continue
+
+            downloaded: list = []
+            file_entries: list = []
+            for db_file in issue_files.main_files + issue_files.auxiliary_files:
+                try:
+                    dest = api.download_file(db_file, issue_cache_dir)
+                    _log.info(f"  Downloaded {dest.name} ({dest.stat().st_size:,} bytes)")
+
+                    taw_db_type = None
+                    if dest.suffix.lower() == ".taw":
+                        try:
+                            taw_db_type = TAWParser().parse(dest).header.database_type
+                        except Exception:
+                            pass
+
+                    cache_path = str(dest.relative_to(cache_dir))
+                    downloaded.append(dest)
+                    file_entries.append({
+                        "cache_path": cache_path,
+                        "destination": db_file.destination,
+                        "taw_database_type": taw_db_type,
+                    })
+                    # Hardlink into card dir
+                    _link_or_copy(dest, card_dir / cache_path)
+                    manifest_entries.append({
+                        "local_path": cache_path,
+                        "destination": db_file.destination,
+                        "avdb_type": avdb.name,
+                        "avdb_type_id": avdb.type_id,
+                        "series_id": s.series_id,
+                        "issue_name": issue.name,
+                        "device_id": target_dev.device_id,
+                        "removable_paths": issue_files.removable_paths,
+                        "unlock_codes": [],
+                        "taw_database_type": taw_db_type,
+                    })
+                except Exception as e:
+                    _log.error(f"  Download failed for {db_file.file_name}: {e}")
+
+            # Extract per-feature CRCs from the downloaded TAW files (fast path:
+            # read last 4 bytes of each raw region — no full extraction needed).
+            feature_crcs: dict = {}
+            for dest in downloaded:
+                if dest.suffix.lower() == ".taw":
+                    feature_crcs.update(_extract_taw_crcs(dest))
+            if feature_crcs:
+                _log.info(f"  Extracted CRCs: { {k: hex(v) for k, v in feature_crcs.items()} }")
+
+            _release_dl_slot(
+                cache_dir, cache_key,
+                files=file_entries,
+                feature_crcs=feature_crcs,
+                removable_paths=issue_files.removable_paths,
+                avdb_type_id=avdb.type_id,
+                series_id=s.series_id,
+                success=bool(downloaded),
+            )
+
+        if not manifest_entries:
+            _log.info(f"  Nothing to install for card at {mount}")
+            continue
+
+        # Write per-card manifest (files are in card_dir, local_path relative to card_dir)
+        system_ids = batch_system_ids or (
+            [target_dev.system_id_raw] if target_dev.system_id_raw is not None else []
+        )
+        manifest_path = card_dir / "navdata_manifest.json"
+        with open(manifest_path, "w") as f:
+            json.dump({
+                "downloaded_at": datetime.datetime.now().isoformat(),
+                "aircraft": ac.tail_number,
+                "card_serial": card_serial,
+                "system_ids": system_ids,
+                "batch_id": batch_id,
+                "device_database_type": target_db_type,
+                "device_type_map": device_type_map,
+                "entries": manifest_entries,
+            }, f, indent=2)
+
+        _log.info(f"  Installing to {mount}...")
+        try:
+            ctx.invoke(navdata_install, sd_card=mount, from_dir=card_dir, yes=True)
+        except SystemExit as e:
+            if e.code != 0:
+                _log.error(f"  Install failed (exit {e.code})")
+        except Exception as e:
+            _log.error(f"  Install raised: {e}")
+
+    if _we_mounted:
+        try:
+            detector.unmount_card(_we_mounted)
+        except Exception as e:
+            _log.warning(f"Could not unmount {_we_mounted}: {e}")
 
 
 # ============================================================================

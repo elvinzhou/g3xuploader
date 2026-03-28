@@ -193,7 +193,7 @@ GET /avdb-series/<seriesID>/<issueName>/unlock/
 Note: `cardSerial` is the volume serial number of the SD card (obtainable on
 Linux via `lsblk -o SERIAL` or by reading the FAT32 volume ID bytes).
 
-#### 6. Fetch File List and Download
+#### 6. Fetch File List
 
 ```
 GET /avdb-series/<seriesID>/<issueName>/files/
@@ -201,16 +201,66 @@ GET /avdb-series/<seriesID>/<issueName>/files/
         "issueType": "TAW",
         "totalFileSize": 123456789,
         "mainFiles": [
-          { "url": "https://...", "fileSize": 123456, "destination": "Garmin/..." }
+          { "url": "https://avdb.garmin.com/dg3xt-us-26D2.taw",
+            "fileSize": 123456, "destination": "Garmin/terrain/" }
         ],
-        "auxiliaryFiles": [...],
+        "auxiliaryFiles": [
+          { "url": "https://avdb.garmin.com/006-D3497-XX-2603-1/SECT/SECT_N18W066.jnx",
+            "fileSize": 9876, "destination": "Garmin/charts/sectional/" }
+        ],
         "removablePaths": ["Garmin/terrain/..."]
       }
 ```
 
-Each file is downloaded directly from the signed URL (no extra auth header needed).
-Files are TAW archives (Transfer Archive for Windows) — Garmin's proprietary
-container format.
+#### 7. HEAD then GET Each File
+
+For every file in the list, Garmin's client first sends a `HEAD` request to
+confirm the file is accessible and to obtain the authoritative content length,
+then follows with a `GET` to stream the bytes:
+
+```
+HEAD https://avdb.garmin.com/dg3xt-us-26D2.taw
+     User-Agent: Garmin Aviation Database Manager/25.10.23 (win32 10.0.26200 - ia32)
+     (no Authorization header)
+     → 200 OK, Content-Length: 123456
+
+GET  https://avdb.garmin.com/dg3xt-us-26D2.taw
+     (stream to disk)
+```
+
+Files are served from `avdb.garmin.com` — a separate host from the API.
+**No `Authorization` header is sent for downloads.** Access is controlled
+server-side: the `unlock` call earlier in the session registers the device +
+card serial, and the server grants download access for that session.
+
+#### File Naming Convention
+
+TAW filenames encode the database type, device model, region, and cycle:
+
+```
+<type-prefix><device>-<region>-<cycle>.taw
+
+Examples:
+  dg3xt-us-26D2.taw      d=terrain,  g3xt=G3X Touch, us=US, cycle 26D2
+  bg3xt-us-26B2.taw      b=basemap,  g3xt=G3X Touch, us=US, cycle 26B2
+  cg3xt-us-2603.taw      c=charts,   g3xt=G3X Touch, us=US, cycle 2603
+  jg3xtva-us-2603.taw    j=jeppesen, g3xtva=G3X Touch VA,   cycle 2603
+```
+
+JNX raster chart files are distributed as individual tiles under a
+part-number directory tree:
+
+```
+006-D3497-XX-2603-1/
+├── SECT/     SECT_N18W066.jnx   ← VFR sectionals, tile named by lat/lon
+├── HI/       HI_ALASKA_W.jnx    ← IFR hi-altitude enroutes
+└── HELI/     HELI_N30W102.jnx   ← Helicopter charts
+```
+
+HIF (`.hif`) files are single-file helicopter information databases:
+```
+006-D3497-15-2603.1.hif
+```
 
 ### What AVCardTool Does
 
@@ -226,20 +276,26 @@ AVCardTool mirrors this flow exactly:
 | Update plan | `GET /batch-updates/{id}/` + v5 Accept header | `FlyGarminAPI.get_batch_update()` |
 | Unlock | `GET /unlock/` with `BatchUpdate id=` header | `FlyGarminAPI.unlock(batch_id=...)` |
 | File list | `GET /files/` | `FlyGarminAPI.list_files()` |
-| Download | Stream from signed URL | `FlyGarminAPI.download_file()` |
+| HEAD check | `HEAD avdb.garmin.com/<file>` (no auth) | `FlyGarminAPI.check_file()` |
+| Download | `GET avdb.garmin.com/<file>` stream | `FlyGarminAPI.download_file()` |
 | Install | TAW extraction + SD card write | `taw_parser.py` + `sdcard.py` (in progress) |
 
 **Fallback behavior**: If `POST /batch-updates/` fails (network error, API change),
 `avcardtool navdata download` falls back to direct Bearer-token unlock
 (`Authorization: Bearer <token>`) for each database individually.
 
-### TAW Format
+### File Formats
 
-TAW (Transfer Archive for Windows) is Garmin's proprietary distribution format.
-Files contain a header identifying the database type and region, followed by
-compressed database content. `taw_parser.py` handles extraction; output is
-written to the correct subdirectory on the SD card as specified by the
-`destination` field in the files/ response.
+| Extension | Description | How AVCardTool handles it |
+|-----------|-------------|--------------------------|
+| `.taw` | Transfer Archive for Windows — main Garmin db format | `taw_parser.py` extracts to SD card |
+| `.jnx` | Raster chart tile (sectional, hi/lo enroute, heli) | Copied directly to SD card at `destination` path |
+| `.hif` | Helicopter Information File | Copied directly to SD card at `destination` path |
+
+TAW is Garmin's proprietary container format. Files have a typed header
+identifying the database and region, followed by compressed content.
+The `destination` field in the `files/` API response specifies the target
+subdirectory on the SD card (e.g. `Garmin/terrain/`).
 
 ## Authentication Details
 

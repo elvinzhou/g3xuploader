@@ -1,0 +1,32 @@
+[Unit]
+Description=AVCardTool NavData Auto-Update for %i
+Documentation=https://github.com/elvinzhou/g3xuploader
+# Keep this unit alive as long as the block device exists
+BindsTo=dev-%i.device
+After=dev-%i.device
+# udisks2 typically auto-mounts FAT32 cards; wait for it before we start
+After=udisks2.service
+
+[Service]
+Type=oneshot
+# Brief pause to let udisks2 finish mounting before we scan
+ExecStartPre=/bin/sleep 3
+ExecStart=/usr/local/bin/avcardtool navdata auto-update /dev/%i
+StandardOutput=journal
+StandardError=journal
+User=AVCARDTOOL_USER
+Group=AVCARDTOOL_USER
+
+# Security hardening
+PrivateTmp=yes
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=AVCARDTOOL_DATA_DIR AVCARDTOOL_CONFIG_DIR
+
+# Downloads can be large (~600 MB) and the card write is slow
+TimeoutStartSec=1800
+CPUQuota=50%
+MemoryLimit=512M
+
+[Install]
+WantedBy=multi-user.target

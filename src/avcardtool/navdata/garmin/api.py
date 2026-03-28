@@ -73,7 +73,8 @@ class AvdbType:
 class Device:
     device_id: int
     name: str
-    system_id: str              # used as deviceID in unlock call
+    system_id: str              # hardware identifier (string form)
+    system_id_raw: Optional[int]  # raw integer systemId from API (used for feat_unlk.dat)
     display_serial: str
     avdb_status: str
     avdb_types: List[AvdbType] = field(default_factory=list)
@@ -178,10 +179,12 @@ def _parse_avdb_type(raw: dict) -> AvdbType:
 
 
 def _parse_device(raw: dict) -> Device:
+    raw_sid = raw.get("systemId", raw.get("serial"))
     return Device(
         device_id=raw.get("id", 0),
         name=raw.get("name", ""),
-        system_id=str(raw.get("systemId", raw.get("serial", ""))),
+        system_id=str(raw_sid) if raw_sid is not None else "",
+        system_id_raw=int(raw_sid) if isinstance(raw_sid, int) else None,
         display_serial=raw.get("displaySerial", ""),
         avdb_status=raw.get("avdbStatus", ""),
         avdb_types=[_parse_avdb_type(a) for a in raw.get("avdbTypes", [])],
@@ -341,7 +344,7 @@ class FlyGarminAPI:
         series_id: int,
         issue_name: str,
         device_id: int,
-        card_serial: str,
+        card_serial: Optional[str] = None,
         batch_id: Optional[str] = None,
     ) -> dict:
         """
@@ -351,7 +354,9 @@ class FlyGarminAPI:
             series_id:   Series.series_id
             issue_name:  Issue.name  (e.g. "2603")
             device_id:   Device.device_id
-            card_serial: SD card volume serial (from SDCardDetector)
+            card_serial: SD card volume serial (from SDCardDetector).
+                         Omitted from the request when None, "0", or empty —
+                         Garmin's client does not always send it (e.g. Airport Dir).
             batch_id:    If provided, use BatchUpdate authorization instead of Bearer
         """
         if batch_id:
@@ -359,17 +364,101 @@ class FlyGarminAPI:
         else:
             auth_header = self._auth_headers()
 
+        params: dict = {"deviceIDs": device_id}
+        if card_serial and card_serial != "0":
+            params["cardSerial"] = card_serial
+
         resp = self._session.get(
             f"{FLYGARMIN_API}/avdb-series/{series_id}/{issue_name}/unlock/",
-            params={
-                "deviceIDs": device_id,
-                "cardSerial": card_serial,
-            },
+            params=params,
             headers=auth_header,
             timeout=30,
         )
         resp.raise_for_status()
         return resp.json()
+
+    def report_installed_issues(
+        self,
+        installations: List[dict],
+        batch_id: str,
+    ) -> None:
+        """
+        Notify flyGarmin that databases have been installed (PUT /devices/installed-issues).
+
+        Garmin's client calls this after every successful install so the server
+        can update subscription tracking and show the correct cycle on the website.
+
+        Args:
+            installations: list of dicts with keys:
+                name        – issue name (e.g. "26D2")
+                seriesID    – Series.series_id
+                installedAt – ISO-8601 UTC timestamp (e.g. "2026-03-28T02:46:29.768Z")
+                avdbTypeID  – AvdbType.type_id
+                deviceID    – Device.device_id
+            batch_id: batch session UUID (used for BatchUpdate authorization)
+        """
+        import datetime
+        # Fill in installedAt for any entries missing it
+        now = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        for entry in installations:
+            entry.setdefault("installedAt", now)
+
+        resp = self._session.put(
+            f"{FLYGARMIN_API}/devices/installed-issues",
+            json=installations,
+            headers={
+                "Authorization": f'BatchUpdate id="{batch_id}"',
+                "Content-Type": "application/json",
+            },
+            timeout=30,
+        )
+        # Accept 200 or 204; log but don't raise on failure (non-critical)
+        if resp.status_code not in (200, 204):
+            logger.warning(
+                f"PUT /devices/installed-issues returned {resp.status_code} — "
+                "subscription tracking may not update on fly.garmin.com"
+            )
+        else:
+            logger.debug(f"Reported {len(installations)} installed issue(s) to flyGarmin")
+
+    def list_device_models(self) -> List[dict]:
+        """
+        Return all known Garmin avionics device models.
+
+        Each dict has at least: id, name, productID.
+        productID equals the TAW header database_type / feat_unlk security_id
+        for that device family.
+
+        No Authorization header needed — this endpoint is public.
+        """
+        resp = self._session.get(
+            f"{FLYGARMIN_API}/device-models/",
+            timeout=30,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return data if isinstance(data, list) else []
+
+    def check_file(self, url: str) -> Optional[int]:
+        """
+        HEAD request to confirm a file exists on avdb.garmin.com and get its size.
+
+        Mirrors what Garmin's own client does before every download.
+        No Authorization header is needed — the server grants access based on
+        the unlock call made earlier in the session.
+
+        Returns:
+            Content-Length as int, or None if the file is not found / HEAD fails.
+        """
+        try:
+            resp = self._session.head(url, timeout=30)
+            if resp.status_code == 200:
+                return int(resp.headers.get("content-length", 0)) or None
+            logger.debug(f"HEAD {url} → {resp.status_code}")
+            return None
+        except Exception as e:
+            logger.debug(f"HEAD {url} failed: {e}")
+            return None
 
     def download_file(
         self,
@@ -377,18 +466,29 @@ class FlyGarminAPI:
         output_dir: Path,
         progress_callback: Optional[Callable[[int, int], None]] = None,
     ) -> Path:
-        """Download a single DatabaseFile to output_dir."""
+        """
+        Download a single DatabaseFile to output_dir.
+
+        Performs a HEAD request first (matching Garmin's client behaviour) to
+        confirm the file is accessible and to resolve the accurate file size
+        before streaming.  Files are served from avdb.garmin.com without an
+        Authorization header — access is controlled server-side after unlock.
+        """
         output_dir.mkdir(parents=True, exist_ok=True)
         dest = output_dir / db_file.file_name
 
-        logger.info(f"Downloading {db_file.file_name} ({db_file.file_size:,} bytes)")
+        # HEAD first — verify accessibility and get authoritative size
+        server_size = self.check_file(db_file.url)
+        total = server_size or db_file.file_size
+        logger.info(f"Downloading {db_file.file_name} ({total:,} bytes)")
 
         resp = self._session.get(db_file.url, stream=True, timeout=600)
         resp.raise_for_status()
 
-        total = db_file.file_size or int(resp.headers.get("content-length", 0))
-        downloaded = 0
+        if not total:
+            total = int(resp.headers.get("content-length", 0))
 
+        downloaded = 0
         with open(dest, "wb") as f:
             for chunk in resp.iter_content(chunk_size=65536):
                 if chunk:

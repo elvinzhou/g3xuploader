@@ -24,50 +24,92 @@ from enum import IntEnum
 logger = logging.getLogger(__name__)
 
 
+def _set_hidden(path: Path) -> None:
+    """
+    Set the FAT hidden attribute on a file to match Garmin's own output.
+
+    On Linux with a FAT filesystem, uses `fatattr +h`.  Silently skips
+    if fatattr is not installed — the G3X reads files regardless of the
+    hidden attribute; this just keeps the card visually clean on Windows.
+    """
+    import subprocess
+    try:
+        subprocess.run(["fatattr", "+h", str(path)],
+                       capture_output=True, timeout=5)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+
 class TAWRegionType(IntEnum):
     """Known TAW region types and their purposes"""
     NAVIGATION = 0x01      # Navigation database (ldr_sys/avtn_db.bin)
     BASEMAP = 0x02         # Base map data
-    TERRAIN_TDB = 0x21     # Terrain database (.tdb)
-    TERRAIN_ODB = 0x22     # Terrain obstacles (terrain_9as.odb)
-    TERRAIN_TRN = 0x23     # Terrain data (trn.dat)
-    FCHARTS = 0x24         # FliteCharts data
-    FCHARTS_INDEX = 0x25   # FliteCharts index
-    OBSTACLES = 0x26       # Obstacle database
-    TERRAIN_ODB2 = 0x27    # Secondary terrain obstacles
-    SAFETAXI = 0x10        # SafeTaxi database
-    CHARTVIEW = 0x11       # ChartView data
+    BASEMAP_2 = 0x03       # Basemap variant
+    BASEMAP_3 = 0x06       # Basemap variant
+    SAFETAXI = 0x0A        # SafeTaxi database (safetaxi.bin) — confirmed from real TAW
+    SAFETAXI_IMG = 0x0B    # SafeTaxi image variant (safetaxi.img)
+    UNKNOWN_0C = 0x0C      # Unknown (183 KB, appears in nav files — not extracted)
     FC_TPC = 0x14          # FliteCharts TPC (fc_tpc/fc_tpc.dat)
-    RASTERS = 0x1A         # Raster data (rasters/rasters.xml)
-    UNKNOWN_0C = 0x0C      # Unknown region type
+    RASTERS = 0x1A         # Raster data (rasters/rasters.hif)
+    TERRAIN_TDB = 0x22     # Terrain tile database (terrain_9as.tdb)
+    TERRAIN_TRN = 0x23     # Terrain data (trn.dat)
+    FCHARTS = 0x24         # FliteCharts data (FCharts.dat)
+    FCHARTS_INDEX = 0x25   # FliteCharts additional data (fc_tpc/fc_tpc.fca)
+    OBSTACLES = 0x26       # Obstacle database (obstacles.odb)
+    TERRAIN_ODB = 0x27     # Obstacle terrain database (terrain.odb) — G3X Touch
+    AIRPORT_DIR = 0x4C     # Airport Directory (fbo.gpi)
 
 
-# Map region types to output paths
+# Map region types to output paths on the SD card.
+# Confirmed from real TAW files (parsed from fly.garmin.com downloads).
 TAW_REGION_PATHS: Dict[int, str] = {
     0x01: "ldr_sys/avtn_db.bin",
     0x02: "basemap.bin",
-    0x10: "safetaxi.bin",
-    0x11: "chartview.bin",
+    0x0A: "safetaxi.bin",      # confirmed from sg3xt-us-26S2.taw (G3X Touch)
+    0x0B: "safetaxi.img",      # SafeTaxi for other avionics units
     0x14: "fc_tpc/fc_tpc.dat",
-    0x1A: "rasters/rasters.xml",
-    0x21: "terrain.tdb",
-    0x22: "terrain_9as.odb",  # Note: jdmtool issue #57 correction
+    0x1A: "rasters/rasters.xml",  # confirmed: 41,067 bytes matches GADM rasters.xml
+    0x22: "terrain_9as.tdb",   # confirmed from tg3xt-ww-20T1.taw
     0x23: "trn.dat",
-    0x24: "FCharts.dat",
-    0x25: "Fcharts.fca",
+    0x24: "fc_tpc/fc_tpc.dat",  # confirmed: 3,097,678 bytes matches GADM output
+    0x25: "fc_tpc/fc_tpc.fca",
     0x26: "obstacles.odb",
-    0x27: "terrain.odb",
+    0x27: "terrain.odb",       # confirmed from bg3xt-us-26B2.taw (G3X Touch obstacles)
+    0x4C: "fbo.gpi",           # confirmed from dg3xt-us-26D2.taw (Airport Directory)
+}
+
+# Region types that appear in TAW files but are NOT extracted to the SD card.
+# 0x0c: fixed-size (183,808 bytes) certificate/signature block in nav files.
+SKIP_REGIONS: set = {0x0C}
+
+# Files Garmin sets as hidden on the SD card (FAT hidden attribute).
+# On Linux/FAT32 these can be hidden with: fatattr +h <file>
+# The G3X reads them regardless of the attribute; hiding matches
+# what Garmin's desktop software produces.
+HIDDEN_PATHS = {
+    "ldr_sys/avtn_db.bin",
+    "safetaxi.bin",
+    "terrain.odb",
+    "terrain_9as.tdb",
+    "trn.dat",
+    "obstacles.odb",
+    "fc_tpc/fc_tpc.dat",
+    "fc_tpc/fc_tpc.fca",
+    "feat_unlk.dat",
+    "fbo.gpi",
+    ".evidf.dat",
+    ".gadm.meta",
 }
 
 
-# G3X-specific database file mappings
+# G3X-specific database file mappings (used for post-install verification)
 G3X_DATABASE_STRUCTURE = {
     "navdata": {
         "required": ["ldr_sys/avtn_db.bin"],
         "optional": [],
     },
     "terrain": {
-        "required": ["terrain.tdb", "terrain_9as.odb"],
+        "required": ["terrain.odb", "terrain_9as.tdb"],
         "optional": ["trn.dat"],
     },
     "obstacles": {
@@ -79,8 +121,8 @@ G3X_DATABASE_STRUCTURE = {
         "optional": [],
     },
     "flitecharts": {
-        "required": ["FCharts.dat", "Fcharts.fca"],
-        "optional": ["fc_tpc/fc_tpc.dat", "rasters/rasters.xml"],
+        "required": ["FCharts.dat"],
+        "optional": ["fc_tpc/fc_tpc.dat", "fc_tpc/fc_tpc.fca"],
     },
     "chartview": {
         "required": ["chartview.bin"],
@@ -158,184 +200,228 @@ class TAWParseError(Exception):
     pass
 
 
+# ---------------------------------------------------------------------------
+# Actual TAW binary format (reverse-engineered by jdmtool)
+#
+# File layout:
+#   [5]  magic:     b'wAt.d' or b'pWa.d'
+#   [15] separator: TAW_SEPARATOR
+#   [25] sqa1:      null-delimited strings (ignored)
+#   [4]  meta_len:  LE uint32 — length of metadata block
+#   [1]  'F':       section marker
+#   [N]  metadata:  database_type (2 B LE), year, cycle, null-term strings
+#   [4]  remaining: skip
+#   [1]  'R':       section marker
+#   [5]  KpGrd:     second magic
+#   [15] separator: TAW_SEPARATOR again
+#   [25] sqa2:      null-delimited strings (ignored)
+#
+# Sections follow, each:
+#   [4]  sect_size: LE uint32 (total section size)
+#   [1]  type:      b'R' = region data, b'S' = stop
+#   [2]  region:    LE uint16 (index into TAW_REGION_PATHS)
+#   [4]  unknown:   LE uint32 (ignored)
+#   [4]  data_size: LE uint32
+#   [N]  data:      data_size bytes (raw or zlib-compressed)
+# ---------------------------------------------------------------------------
+
+_TAW_MAGIC_BYTES = (b'wAt.d', b'pWa.d')
+_TAW_SEPARATOR = b'\x00\x02\x00\x00\x00Dd\x00\x1b\x00\x00\x00A\xc8\x00'  # 15 bytes
+_TAW_MAGIC2 = b'KpGrd'   # 5 bytes, second magic inside header
+
+
 class TAWParser:
     """
-    Parser for TAW and AWP files.
-    
-    TAW files are used by Garmin to distribute aviation databases.
-    They contain multiple compressed regions, each representing a
-    different database component.
+    Parser for Garmin TAW (Transfer Archive for Windows) files.
+
+    Handles the binary format used by flyGarmin (magic: wAt.d / pWa.d).
+    Format reverse-engineered by jdmtool (https://github.com/dimaryaz/jdmtool).
     """
-    
-    # TAW magic bytes
-    TAW_MAGIC = b'TAW\x00'
-    AWP_MAGIC = b'AWP\x00'
-    
+
     def __init__(self):
-        self.debug = False
-    
+        pass
+
     def parse(self, filepath: Path) -> TAWFile:
         """
-        Parse a TAW or AWP file.
-        
+        Parse a TAW file.
+
         Args:
-            filepath: Path to the TAW/AWP file
-            
+            filepath: Path to the TAW file
+
         Returns:
             Parsed TAWFile object
-            
+
         Raises:
             TAWParseError: If the file cannot be parsed
         """
         logger.info(f"Parsing {filepath}")
-        
+
         try:
             with open(filepath, 'rb') as f:
-                # Read and validate magic
-                magic = f.read(4)
-                if magic not in (self.TAW_MAGIC, self.AWP_MAGIC):
-                    raise TAWParseError(f"Invalid magic bytes: {magic.hex()}")
-                
-                # Parse header
-                header = self._parse_header(f, magic)
-                
-                # Parse regions
-                regions = self._parse_regions(f, header.num_regions)
-                
+                magic, header = self._parse_header(f)
+                regions = self._parse_regions(f)
+
                 return TAWFile(
                     filepath=filepath,
                     header=header,
-                    regions=regions
+                    regions=regions,
                 )
-                
+
         except TAWParseError:
             raise
         except Exception as e:
             raise TAWParseError(f"Failed to parse {filepath}: {e}")
-    
-    def _parse_header(self, f: BinaryIO, magic: bytes) -> TAWHeader:
-        """Parse the TAW file header"""
-        # Header format varies slightly between TAW versions
-        # Common format:
-        # - 4 bytes: magic
-        # - 2 bytes: version
-        # - 2 bytes: database type
-        # - 1 byte: year (offset from 2000)
-        # - 1 byte: cycle
-        # - Variable: strings for avionics, coverage, type name
-        # - 4 bytes: number of regions
-        
-        version, db_type = struct.unpack('<HH', f.read(4))
-        year, cycle = struct.unpack('<BB', f.read(2))
-        
-        # Read null-terminated strings
-        avionics = self._read_string(f)
-        coverage = self._read_string(f)
-        db_type_name = self._read_string(f)
-        
-        # Read number of regions
-        num_regions = struct.unpack('<I', f.read(4))[0]
-        
+
+    def _parse_header(self, f: BinaryIO) -> tuple:
+        """Parse the TAW file header; returns (magic_bytes, TAWHeader)."""
+        # ---- 5-byte magic ----
+        magic = f.read(5)
+        if magic not in _TAW_MAGIC_BYTES:
+            raise TAWParseError(f"Invalid magic bytes: {magic.hex()}")
+
+        # ---- separator ----
+        sep = f.read(len(_TAW_SEPARATOR))
+        if sep != _TAW_SEPARATOR:
+            raise TAWParseError(f"Unexpected separator: {sep.hex()}")
+
+        # ---- sqa1 (25 bytes, ignored) ----
+        f.read(25)
+
+        # ---- metadata block ----
+        meta_len = struct.unpack('<I', f.read(4))[0]
+        section_type = f.read(1)
+        if section_type != b'F':
+            raise TAWParseError(f"Expected 'F' section, got {section_type!r}")
+        metadata = f.read(meta_len)
+        f.read(4)  # remaining field (skip)
+
+        # ---- second header block ----
+        section_type = f.read(1)
+        if section_type != b'R':
+            raise TAWParseError(f"Expected 'R' section, got {section_type!r}")
+        magic2 = f.read(5)
+        if magic2 != _TAW_MAGIC2:
+            raise TAWParseError(f"Expected KpGrd, got {magic2!r}")
+        sep2 = f.read(len(_TAW_SEPARATOR))
+        if sep2 != _TAW_SEPARATOR:
+            raise TAWParseError(f"Unexpected second separator: {sep2.hex()}")
+        f.read(25)  # sqa2 (ignored)
+
+        # ---- parse metadata ----
+        header = self._parse_metadata(magic, metadata)
+        return magic, header
+
+    def _parse_metadata(self, magic: bytes, metadata: bytes) -> TAWHeader:
+        """Decode the metadata block into a TAWHeader."""
+        db_type = struct.unpack('<H', metadata[:2])[0]  # security_id / database_type
+
+        # Two metadata layouts depending on metadata[2]
+        if metadata[2] == 0x00:
+            year  = metadata[8]
+            cycle = metadata[12]
+            text  = metadata[16:]
+        else:
+            year  = metadata[4]
+            cycle = metadata[6]
+            text  = metadata[8:]
+
+        parts = text.split(b'\x00')
+        avionics   = parts[0].decode('utf-8', errors='replace') if len(parts) > 0 else ''
+        coverage   = parts[1].decode('utf-8', errors='replace') if len(parts) > 1 else ''
+        db_type_nm = parts[2].decode('utf-8', errors='replace') if len(parts) > 2 else ''
+
         header = TAWHeader(
             magic=magic,
-            version=version,
+            version=0,        # not in this format; kept for API compatibility
             database_type=db_type,
             year=year,
             cycle=cycle,
             avionics=avionics,
             coverage=coverage,
-            db_type_name=db_type_name,
-            num_regions=num_regions,
+            db_type_name=db_type_nm,
+            num_regions=0,    # filled in after reading sections
         )
-        
-        logger.debug(f"Header: type={db_type}, cycle={header.cycle_string}, "
-                    f"avionics='{avionics}', regions={num_regions}")
-        
+
+        logger.debug(
+            f"Metadata: db_type=0x{db_type:04X} year={year} cycle={cycle} "
+            f"avionics='{avionics}' coverage='{coverage}' type='{db_type_nm}'"
+        )
         return header
-    
-    def _read_string(self, f: BinaryIO) -> str:
-        """Read a null-terminated string"""
-        chars = []
+
+    def _parse_regions(self, f: BinaryIO) -> List[TAWRegion]:
+        """Read all region sections sequentially until the 'S' stop marker."""
+        regions: List[TAWRegion] = []
+
         while True:
-            c = f.read(1)
-            if not c or c == b'\x00':
-                break
-            chars.append(c)
-        return b''.join(chars).decode('utf-8', errors='replace')
-    
-    def _parse_regions(self, f: BinaryIO, num_regions: int) -> List[TAWRegion]:
-        """Parse all regions in the TAW file"""
-        regions = []
-        
-        # First pass: read region headers
-        region_headers = []
-        for i in range(num_regions):
-            # Region header format:
-            # - 4 bytes: region type
-            # - 4 bytes: offset (from start of data section)
-            # - 4 bytes: compressed size
-            # - 4 bytes: uncompressed size
-            # - Variable: destination path (null-terminated)
-            
-            region_type = struct.unpack('<I', f.read(4))[0]
-            offset = struct.unpack('<I', f.read(4))[0]
-            compressed_size = struct.unpack('<I', f.read(4))[0]
-            uncompressed_size = struct.unpack('<I', f.read(4))[0]
-            dest_path = self._read_string(f)
-            
-            region_headers.append((
-                region_type, offset, compressed_size, 
-                uncompressed_size, dest_path
-            ))
-            
-            logger.debug(f"Region {i}: type=0x{region_type:02x}, "
-                        f"compressed={compressed_size}, "
-                        f"uncompressed={uncompressed_size}, "
-                        f"path='{dest_path}'")
-        
-        # Record the start of data section
-        data_start = f.tell()
-        
-        # Second pass: create region objects
-        for region_type, offset, compressed_size, uncompressed_size, dest_path in region_headers:
+            size_bytes = f.read(4)
+            if len(size_bytes) < 4:
+                break  # EOF
+
+            sect_size   = struct.unpack('<I', size_bytes)[0]
+            sect_type   = f.read(1)
+
+            if sect_type == b'S':
+                break   # stop sentinel
+
+            if sect_type != b'R':
+                raise TAWParseError(f"Unexpected section type: {sect_type!r}")
+
+            region_id   = struct.unpack('<H', f.read(2))[0]
+            _unknown    = f.read(4)
+            data_size   = struct.unpack('<I', f.read(4))[0]
+            data_start  = f.tell()
+
+            dest_path = TAW_REGION_PATHS.get(region_id, f"region_{region_id:02x}.bin")
+
             region = TAWRegion(
-                region_type=region_type,
-                offset=data_start + offset,
-                compressed_size=compressed_size,
-                uncompressed_size=uncompressed_size,
+                region_type=region_id,
+                offset=data_start,           # absolute file offset of raw data
+                compressed_size=data_size,   # we call this "compressed" for the extractor
+                uncompressed_size=data_size, # updated after decompression attempt
                 dest_path=dest_path,
             )
             regions.append(region)
-        
+
+            logger.debug(
+                f"Region 0x{region_id:02x}: {data_size} bytes at offset {data_start}"
+                f" → {dest_path}"
+            )
+
+            f.seek(data_start + data_size)
+
         return regions
-    
+
+
     def extract_region(self, f: BinaryIO, region: TAWRegion) -> bytes:
         """
-        Extract and decompress a single region.
-        
+        Extract a single region's data.
+
+        Section data in flyGarmin TAW files is typically stored raw
+        (uncompressed).  A zlib fallback is tried in case a section uses
+        deflate compression.
+
         Args:
-            f: Open file handle
-            region: Region to extract
-            
+            f: Open file handle positioned at the start of the TAW file
+            region: Region to extract (offset is absolute file position)
+
         Returns:
-            Decompressed region data
+            Raw region bytes ready to write to the SD card
         """
         f.seek(region.offset)
-        compressed_data = f.read(region.compressed_size)
-        
-        if region.compressed_size == region.uncompressed_size:
-            # Data is not compressed
-            return compressed_data
-        
+        data = f.read(region.compressed_size)
+
+        # Try zlib decompression (deflate with zlib header, then raw deflate).
+        # If neither works, the data is raw — return as-is.
         try:
-            # Try zlib decompression
-            return zlib.decompress(compressed_data)
+            return zlib.decompress(data)
         except zlib.error:
-            # Try raw deflate (no header)
-            try:
-                return zlib.decompress(compressed_data, -15)
-            except zlib.error as e:
-                raise TAWParseError(f"Failed to decompress region 0x{region.region_type:02x}: {e}")
+            pass
+        try:
+            return zlib.decompress(data, -15)
+        except zlib.error:
+            pass
+
+        return data
 
 
 class TAWExtractor:
@@ -375,10 +461,23 @@ class TAWExtractor:
         
         with open(taw_file, 'rb') as f:
             for region in parsed.regions:
+                if region.region_type in SKIP_REGIONS:
+                    logger.debug(f"Skipping region 0x{region.region_type:02x} (not for SD card)")
+                    continue
+
+                # Skip regions with no known destination (unknown avionics type or
+                # region for a different device sharing the same subscription).
+                if region.region_type not in TAW_REGION_PATHS:
+                    logger.info(
+                        f"Skipping unknown region 0x{region.region_type:02x} "
+                        f"({region.compressed_size:,} bytes) — not a G3X destination"
+                    )
+                    continue
+
                 output_path = self._get_output_path(
                     output_dir, region, preserve_paths
                 )
-                
+
                 if output_path.exists() and not overwrite:
                     logger.warning(f"Skipping existing file: {output_path}")
                     extracted_files.append(output_path)
@@ -389,20 +488,21 @@ class TAWExtractor:
                 
                 # Extract and write data
                 try:
-                    # Instead of reading everything into memory, we could potentially
-                    # use a streaming decompressor if we wanted to be even more efficient.
-                    # For now, extracting region by region is a good middle ground.
                     data = self.parser.extract_region(f, region)
-                    
+
                     with open(output_path, 'wb') as out:
                         out.write(data)
-                    
+
                     # Clear data from memory
                     del data
-                    
+
+                    # Set FAT hidden attribute to match what Garmin's own client
+                    # produces. Uses fatattr on Linux if available; silent on failure.
+                    _set_hidden(output_path)
+
                     logger.info(f"Extracted: {output_path} ({region.uncompressed_size} bytes)")
                     extracted_files.append(output_path)
-                    
+
                 except TAWParseError as e:
                     logger.error(f"Failed to extract region 0x{region.region_type:02x}: {e}")
         
