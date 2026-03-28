@@ -21,7 +21,7 @@ ReadWritePaths=AVCARDTOOL_DATA_DIR AVCARDTOOL_CONFIG_DIR
 # Resource limits
 TimeoutStartSec=600
 CPUQuota=50%
-MemoryLimit=512M
+MemoryMax=512M
 
 [Install]
 WantedBy=multi-user.target

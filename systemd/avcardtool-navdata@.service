@@ -26,7 +26,7 @@ ReadWritePaths=AVCARDTOOL_DATA_DIR AVCARDTOOL_CONFIG_DIR
 # Downloads can be large (~600 MB) and the card write is slow
 TimeoutStartSec=1800
 CPUQuota=50%
-MemoryLimit=512M
+MemoryMax=512M
 
 [Install]
 WantedBy=multi-user.target

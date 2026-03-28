@@ -456,7 +456,7 @@ def flight_flysto_auth(ctx, authorization_code: str):
 @cli.command('auto-process')
 @click.argument(
     'path',
-    type=click.Path(exists=True, path_type=Path)
+    type=click.Path(path_type=Path)
 )
 @click.option(
     '--service',
