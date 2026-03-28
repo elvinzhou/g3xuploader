@@ -456,7 +456,7 @@ def flight_flysto_auth(ctx, authorization_code: str):
 @cli.command('auto-process')
 @click.argument(
     'path',
-    type=click.Path(path_type=Path)
+    type=click.Path(path_type=Path, readable=False)
 )
 @click.option(
     '--service',
@@ -1779,7 +1779,7 @@ def _update_garmin_device_xml(xml_path: Path, manifest: dict) -> None:
 
 
 @navdata.command('auto-update')
-@click.argument('device', type=click.Path(path_type=Path), required=False)
+@click.argument('device', type=click.Path(path_type=Path, readable=False), required=False)
 @click.pass_context
 def navdata_auto_update(ctx, device: Optional[Path]):
     """
@@ -2274,6 +2274,9 @@ def self_update(ctx, version: Optional[str]):
     Uses the same Python interpreter that is currently running so the correct
     virtual environment or user installation is always targeted.
 
+    Run with sudo to also update udev rules and systemd service files:
+        sudo avcardtool self-update
+
     Examples:
         avcardtool self-update
         avcardtool self-update --version 1.2.0
@@ -2293,16 +2296,109 @@ def self_update(ctx, version: Optional[str]):
         text=True
     )
 
-    if result.returncode == 0:
-        # Extract installed version from pip output, e.g. "Successfully installed avcardtool-1.3.2"
-        match = re.search(r'Successfully installed avcardtool-([\d.]+)', result.stdout)
-        if match:
-            click.echo(f"Updated to v{match.group(1)}. Restart avcardtool service to apply.")
-        else:
-            click.echo("Update successful. Restart avcardtool service to apply.")
-    else:
+    if result.returncode != 0:
         click.echo(f"Update failed:\n{result.stderr.strip()}", err=True)
         sys.exit(1)
+
+    # Extract installed version from pip output, e.g. "Successfully installed avcardtool-1.3.2"
+    match = re.search(r'Successfully installed avcardtool-([\d.]+)', result.stdout)
+    new_version = match.group(1) if match else version
+    if new_version:
+        click.echo(f"Updated to v{new_version}.")
+    else:
+        click.echo("Update successful.")
+
+    # Update system files (udev rules + systemd services) if running as root
+    if os.geteuid() == 0:
+        _update_system_files(ctx, new_version)
+    else:
+        click.echo(
+            "\nNote: udev rules and systemd service files were not updated.\n"
+            "Run 'sudo avcardtool self-update' to update them as well."
+        )
+
+    click.echo("Restart avcardtool service to apply.")
+
+
+def _update_system_files(ctx: click.Context, version: Optional[str]) -> None:
+    """Download and install updated udev rules and systemd service files from GitHub."""
+    import getpass
+    import subprocess
+    import pwd
+
+    cfg = ctx.obj.get('config') if ctx.obj else None
+
+    # Determine the real (non-root) user when invoked via sudo
+    real_username = os.environ.get('SUDO_USER') or getpass.getuser()
+    try:
+        pw = pwd.getpwnam(real_username)
+        real_home = Path(pw.pw_dir)
+    except KeyError:
+        real_home = Path.home()
+
+    data_dir = cfg.system.data_dir if cfg else str(real_home / ".local" / "share" / "avcardtool")
+    config_dir = (
+        str(cfg.config_path.parent)
+        if cfg and cfg.config_path
+        else str(real_home / ".config" / "avcardtool")
+    )
+
+    base_url = (
+        f"https://raw.githubusercontent.com/elvinzhou/g3xuploader/v{version}"
+        if version
+        else "https://raw.githubusercontent.com/elvinzhou/g3xuploader/main"
+    )
+
+    system_files = [
+        {
+            "url": f"{base_url}/systemd/99-avcardtool-sdcard.rules",
+            "dest": Path("/etc/udev/rules.d/99-avcardtool-sdcard.rules"),
+            "substitute": False,
+        },
+        {
+            "url": f"{base_url}/systemd/avcardtool-processor@.service",
+            "dest": Path("/lib/systemd/system/avcardtool-processor@.service"),
+            "substitute": True,
+        },
+        {
+            "url": f"{base_url}/systemd/avcardtool-navdata@.service",
+            "dest": Path("/lib/systemd/system/avcardtool-navdata@.service"),
+            "substitute": True,
+        },
+    ]
+
+    click.echo("\nUpdating system files...")
+    import requests as _requests
+
+    any_updated = False
+    for entry in system_files:
+        try:
+            resp = _requests.get(entry["url"], timeout=30)
+            resp.raise_for_status()
+            content = resp.text
+
+            if entry["substitute"]:
+                content = (
+                    content
+                    .replace("AVCARDTOOL_USER", real_username)
+                    .replace("AVCARDTOOL_DATA_DIR", data_dir)
+                    .replace("AVCARDTOOL_CONFIG_DIR", config_dir)
+                )
+
+            entry["dest"].write_text(content)
+            entry["dest"].chmod(0o644)
+            click.echo(f"  Updated {entry['dest']}")
+            any_updated = True
+        except Exception as e:
+            click.echo(f"  Warning: could not update {entry['dest'].name}: {e}", err=True)
+
+    if any_updated:
+        try:
+            subprocess.run(["udevadm", "control", "--reload-rules"], check=True, capture_output=True)
+            subprocess.run(["systemctl", "daemon-reload"], check=True, capture_output=True)
+            click.echo("  Reloaded udev rules and systemd daemon.")
+        except Exception as e:
+            click.echo(f"  Warning: could not reload system: {e}", err=True)
 
 
 # ============================================================================

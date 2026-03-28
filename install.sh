@@ -186,33 +186,38 @@ udevadm trigger
 echo "Done"
 
 # ---------------------------------------------------------------------------
-# Step 6: systemd service  (requires root — stays system-level)
+# Step 6: systemd services  (requires root — stays system-level)
 # ---------------------------------------------------------------------------
-echo "[6/6] Installing systemd service..."
+echo "[6/6] Installing systemd services..."
 
-SERVICE_SRC="systemd/avcardtool-processor@.service"
-SERVICE_DEST="/lib/systemd/system/avcardtool-processor@.service"
+install_service() {
+    local NAME="$1"
+    local SRC="systemd/${NAME}"
+    local DEST="/lib/systemd/system/${NAME}"
+    local TMP=""
 
-TMP_SERVICE=""
-if [ ! -f "$SERVICE_SRC" ]; then
-    echo "Downloading service file from GitHub..."
-    TMP_SERVICE=$(mktemp)
-    curl -sSL \
-        "https://raw.githubusercontent.com/elvinzhou/g3xuploader/v${INSTALL_VERSION}/systemd/avcardtool-processor@.service" \
-        -o "$TMP_SERVICE"
-    SERVICE_SRC="$TMP_SERVICE"
-fi
+    if [ ! -f "$SRC" ]; then
+        echo "  Downloading ${NAME} from GitHub..."
+        TMP=$(mktemp)
+        curl -sSL \
+            "https://raw.githubusercontent.com/elvinzhou/g3xuploader/v${INSTALL_VERSION}/systemd/${NAME}" \
+            -o "$TMP"
+        SRC="$TMP"
+    fi
 
-# Substitute placeholders with real user paths
-sed \
-    -e "s|AVCARDTOOL_USER|${REAL_USER}|g" \
-    -e "s|AVCARDTOOL_DATA_DIR|${DATA_DIR}|g" \
-    -e "s|AVCARDTOOL_CONFIG_DIR|${CONFIG_DIR}|g" \
-    "$SERVICE_SRC" > "$SERVICE_DEST"
+    sed \
+        -e "s|AVCARDTOOL_USER|${REAL_USER}|g" \
+        -e "s|AVCARDTOOL_DATA_DIR|${DATA_DIR}|g" \
+        -e "s|AVCARDTOOL_CONFIG_DIR|${CONFIG_DIR}|g" \
+        "$SRC" > "$DEST"
 
-[ -n "$TMP_SERVICE" ] && rm -f "$TMP_SERVICE"
+    [ -n "$TMP" ] && rm -f "$TMP"
+    chmod 644 "$DEST"
+    echo "  Installed ${DEST}"
+}
 
-chmod 644 "$SERVICE_DEST"
+install_service "avcardtool-processor@.service"
+install_service "avcardtool-navdata@.service"
 
 # Remove legacy services
 systemctl disable aviation-processor@.service 2>/dev/null || true
