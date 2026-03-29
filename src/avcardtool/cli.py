@@ -492,15 +492,14 @@ def auto_process(ctx, path: Path, service: tuple, skip_uploads: bool):
 
     cfg = ctx.obj['config']
 
-    # Check if path is a device
+    # Resolve device path → mount point
     if path.is_block_device():
-        click.echo(f"Mounting device: {path}")
-        from avcardtool.core import mount_device
-        mount_point = mount_device(path)
-        if not mount_point:
-            click.echo(f"Error: Could not mount {path}", err=True)
+        from avcardtool.core import resolve_device_mount_point
+        try:
+            path = resolve_device_mount_point(path, fallback_mount=False)
+        except RuntimeError as e:
+            click.echo(f"Error: {e}", err=True)
             sys.exit(1)
-        path = Path(mount_point)
     else:
         path = path.resolve()
 
@@ -1866,22 +1865,17 @@ def navdata_auto_update(ctx, device: Optional[Path]):
     _we_mounted: Optional[str] = None
 
     if device:
+        from avcardtool.core import resolve_device_mount_point, get_mount_point
+        already_mounted = get_mount_point(device) is not None
+        try:
+            mount = resolve_device_mount_point(device, readonly=False)
+        except RuntimeError as e:
+            _log.error(f"Could not mount {device}: {e}")
+            sys.exit(1)
+        if not already_mounted:
+            _we_mounted = str(mount)
         all_cards = detector.scan_for_cards()
         cards = [c for c in all_cards if c.device_path == str(device)]
-        if not cards:
-            # Not yet mounted — wait briefly for udisks, then try ourselves
-            import time as _time
-            _time.sleep(2)
-            all_cards = detector.scan_for_cards()
-            cards = [c for c in all_cards if c.device_path == str(device)]
-        if not cards:
-            try:
-                _we_mounted = detector.mount_card(str(device))
-                all_cards = detector.scan_for_cards()
-                cards = [c for c in all_cards if c.device_path == str(device)]
-            except Exception as e:
-                _log.error(f"Could not mount {device}: {e}")
-                sys.exit(1)
     else:
         cards = detector.scan_for_cards()
 

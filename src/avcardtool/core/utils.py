@@ -132,6 +132,42 @@ def get_mount_point(device_path: Path) -> Optional[Path]:
     return None
 
 
+def resolve_device_mount_point(device_path: Path, readonly: bool = True, fallback_mount: bool = True) -> Path:
+    """
+    Resolve a block device to its mount point, waiting briefly for udisks2 if needed.
+
+    1. Checks if the device is already mounted.
+    2. If not, waits 2 seconds (udisks2 may still be mounting) and retries.
+    3. If still not mounted and fallback_mount=True, mounts it directly.
+
+    Args:
+        device_path: Block device path (e.g., /dev/sda1)
+        readonly: Mount read-only if we have to mount it ourselves
+        fallback_mount: If False, raise instead of attempting to mount
+
+    Returns:
+        Mount point Path
+
+    Raises:
+        RuntimeError: If the device cannot be resolved to a mount point
+    """
+    import time as _time
+
+    mount = get_mount_point(device_path)
+    if mount:
+        return mount
+
+    _time.sleep(2)
+    mount = get_mount_point(device_path)
+    if mount:
+        return mount
+
+    if not fallback_mount:
+        raise RuntimeError(f"{device_path} is not mounted and fallback mounting is disabled")
+
+    return mount_device(device_path, readonly=readonly)
+
+
 def mount_device(device_path: Path, mount_point: Optional[Path] = None, readonly: bool = True) -> Path:
     """
     Mount a device.

@@ -21,7 +21,7 @@ Group=AVCARDTOOL_USER
 PrivateTmp=yes
 NoNewPrivileges=true
 ProtectSystem=strict
-ReadWritePaths=AVCARDTOOL_DATA_DIR AVCARDTOOL_CONFIG_DIR /media /run/media
+ReadWritePaths=AVCARDTOOL_DATA_DIR AVCARDTOOL_CONFIG_DIR /media
 
 # Downloads can be large (~600 MB) and the card write is slow
 TimeoutStartSec=1800
