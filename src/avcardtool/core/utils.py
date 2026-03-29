@@ -132,24 +132,23 @@ def get_mount_point(device_path: Path) -> Optional[Path]:
     return None
 
 
-def resolve_device_mount_point(device_path: Path, readonly: bool = True, fallback_mount: bool = True) -> Path:
+def resolve_device_mount_point(device_path: Path, readonly: bool = True) -> Path:
     """
     Resolve a block device to its mount point, waiting briefly for udisks2 if needed.
 
     1. Checks if the device is already mounted.
     2. If not, waits 2 seconds (udisks2 may still be mounting) and retries.
-    3. If still not mounted and fallback_mount=True, mounts it directly.
+    3. If still not mounted, mounts it via udisksctl (no root required).
 
     Args:
         device_path: Block device path (e.g., /dev/sda1)
         readonly: Mount read-only if we have to mount it ourselves
-        fallback_mount: If False, raise instead of attempting to mount
 
     Returns:
         Mount point Path
 
     Raises:
-        RuntimeError: If the device cannot be resolved to a mount point
+        RuntimeError: If the device cannot be mounted
     """
     import time as _time
 
@@ -162,20 +161,17 @@ def resolve_device_mount_point(device_path: Path, readonly: bool = True, fallbac
     if mount:
         return mount
 
-    if not fallback_mount:
-        raise RuntimeError(f"{device_path} is not mounted and fallback mounting is disabled")
-
     return mount_device(device_path, readonly=readonly)
 
 
 def mount_device(device_path: Path, mount_point: Optional[Path] = None, readonly: bool = True) -> Path:
     """
-    Mount a device.
+    Mount a device, preferring udisksctl (no root required) over mount.
 
     Args:
         device_path: Path to device (e.g., /dev/sda1)
-        mount_point: Optional mount point. If None, creates a temp mount point.
-        readonly: Mount as read-only if True
+        mount_point: Optional explicit mount point (only used with the mount fallback).
+        readonly: Mount read-only if True
 
     Returns:
         Path where device was mounted
@@ -183,6 +179,19 @@ def mount_device(device_path: Path, mount_point: Optional[Path] = None, readonly
     Raises:
         RuntimeError: If mount fails
     """
+    # Prefer udisksctl: works as a regular user, lets udisks2 pick the mount point
+    udisksctl_cmd = ['udisksctl', 'mount', '--block-device', str(device_path)]
+    if readonly:
+        udisksctl_cmd.extend(['--options', 'ro'])
+    result = subprocess.run(udisksctl_cmd, capture_output=True, text=True)
+    if result.returncode == 0:
+        # Output: "Mounted /dev/sde1 at /media/user/LABEL."
+        import re
+        m = re.search(r'at\s+(\S+?)\.?$', result.stdout.strip())
+        if m:
+            return Path(m.group(1))
+
+    # Fallback: direct mount (requires root / appropriate permissions)
     if mount_point is None:
         mount_point = Path(f"/media/{device_path.name}")
 
@@ -194,7 +203,6 @@ def mount_device(device_path: Path, mount_point: Optional[Path] = None, readonly
     mount_cmd.extend([str(device_path), str(mount_point)])
 
     result = subprocess.run(mount_cmd, capture_output=True, text=True)
-
     if result.returncode != 0:
         raise RuntimeError(f"Failed to mount {device_path}: {result.stderr}")
 
@@ -203,7 +211,7 @@ def mount_device(device_path: Path, mount_point: Optional[Path] = None, readonly
 
 def unmount_device(mount_point: Path) -> None:
     """
-    Unmount a device.
+    Unmount a device, preferring udisksctl (no root required) over umount.
 
     Args:
         mount_point: Path to mount point
@@ -212,11 +220,19 @@ def unmount_device(mount_point: Path) -> None:
         RuntimeError: If unmount fails
     """
     result = subprocess.run(
+        ['udisksctl', 'unmount', '--mount-point', str(mount_point)],
+        capture_output=True,
+        text=True
+    )
+    if result.returncode == 0:
+        return
+
+    # Fallback: direct umount (requires root)
+    result = subprocess.run(
         ['umount', str(mount_point)],
         capture_output=True,
         text=True
     )
-
     if result.returncode != 0:
         raise RuntimeError(f"Failed to unmount {mount_point}: {result.stderr}")
 

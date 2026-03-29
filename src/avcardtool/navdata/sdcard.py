@@ -361,7 +361,19 @@ class SDCardDetector:
             raise SDCardError(f"Failed to mount {device_path}: {e.stderr.decode()}")
     
     def unmount_card(self, mount_point: str):
-        """Unmount an SD card"""
+        """Unmount an SD card, preferring udisksctl (no root required) over umount."""
+        # Try udisksctl first — works as a regular user
+        result = subprocess.run(
+            ['udisksctl', 'unmount', '--mount-point', mount_point],
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        if result.returncode == 0:
+            logger.info(f"Unmounted {mount_point}")
+            return
+
+        # Fallback: direct umount (requires root)
         try:
             subprocess.run(
                 ['umount', mount_point],
@@ -370,13 +382,12 @@ class SDCardDetector:
                 timeout=30
             )
             logger.info(f"Unmounted {mount_point}")
-            
-            # Try to remove mount point
+
             try:
                 os.rmdir(mount_point)
             except OSError:
                 pass
-                
+
         except subprocess.CalledProcessError as e:
             logger.warning(f"Failed to unmount {mount_point}: {e.stderr.decode()}")
 

@@ -24,20 +24,46 @@ from enum import IntEnum
 logger = logging.getLogger(__name__)
 
 
+def _fatattr(flags: str, path: Path) -> None:
+    """Run fatattr with the given flags (e.g. '+h', '-r', '+r') on a FAT file."""
+    import subprocess
+    try:
+        result = subprocess.run(["fatattr", flags, str(path)],
+                                capture_output=True, timeout=5)
+        if result.returncode != 0:
+            logger.warning(f"fatattr {flags} failed for {path}: {result.stderr.decode().strip()}")
+    except FileNotFoundError:
+        logger.debug(f"fatattr not installed — could not set {flags} on {path} (install fatattr to suppress)")
+    except subprocess.TimeoutExpired:
+        logger.warning(f"fatattr timed out on {path}")
+
+
 def _set_hidden(path: Path) -> None:
     """
     Set the FAT hidden attribute on a file to match Garmin's own output.
 
-    On Linux with a FAT filesystem, uses `fatattr +h`.  Silently skips
-    if fatattr is not installed — the G3X reads files regardless of the
+    Uses fatattr +h on Linux/FAT32.  The G3X reads files regardless of the
     hidden attribute; this just keeps the card visually clean on Windows.
     """
-    import subprocess
+    _fatattr("+h", path)
+
+
+def _set_readonly(path: Path) -> None:
+    """Set the FAT read-only attribute and attempt chmod 444 for non-FAT filesystems."""
+    _fatattr("+r", path)
     try:
-        subprocess.run(["fatattr", "+h", str(path)],
-                       capture_output=True, timeout=5)
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
+        path.chmod(0o444)
+    except OSError as e:
+        logger.debug(f"chmod 444 {path.name}: {e}")
+
+
+def _clear_readonly(path: Path) -> None:
+    """Clear the FAT read-only attribute and attempt chmod 644 for non-FAT filesystems."""
+    _fatattr("-r", path)
+    try:
+        path.chmod(0o644)
+    except OSError as e:
+        logger.debug(f"chmod 644 {path.name}: {e}")
 
 
 class TAWRegionType(IntEnum):

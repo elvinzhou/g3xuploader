@@ -496,7 +496,7 @@ def auto_process(ctx, path: Path, service: tuple, skip_uploads: bool):
     if path.is_block_device():
         from avcardtool.core import resolve_device_mount_point
         try:
-            path = resolve_device_mount_point(path, fallback_mount=False)
+            path = resolve_device_mount_point(path, readonly=True)
         except RuntimeError as e:
             click.echo(f"Error: {e}", err=True)
             sys.exit(1)

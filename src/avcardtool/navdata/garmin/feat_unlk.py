@@ -24,6 +24,8 @@ from io import BytesIO
 from pathlib import Path
 from typing import Optional
 
+from avcardtool.navdata.garmin.taw_parser import _set_readonly, _clear_readonly
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -255,11 +257,9 @@ def update_feat_unlk(
     # --- Write to file at feature's fixed offset ---
     feat_unlk_path = dest_dir / 'feat_unlk.dat'
 
-    # Make writable if it exists as read-only
-    try:
-        feat_unlk_path.chmod(0o644)
-    except OSError:
-        pass
+    # Clear read-only attribute before writing (FAT32 + non-FAT)
+    if feat_unlk_path.exists():
+        _clear_readonly(feat_unlk_path)
 
     # Ensure file exists (open in append mode so it doesn't truncate)
     with open(feat_unlk_path, 'ab'):
@@ -271,11 +271,8 @@ def update_feat_unlk(
         out.write(content2.getbuffer())
         out.write(chk3.to_bytes(4, 'little'))
 
-    # Match JDM: make read-only after writing
-    try:
-        feat_unlk_path.chmod(0o444)
-    except OSError:
-        pass
+    # Match JDM: make read-only after writing (FAT32 + non-FAT)
+    _set_readonly(feat_unlk_path)
 
 
 def write_feat_unlk_for_file(
