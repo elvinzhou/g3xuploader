@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "avcardtool"
-version = "1.4.7"
+version = "1.4.8"
 description = "Aviation SD card tool - Flight data processing and navigation database management for general aviation"
 authors = ["AVCardTool Contributors"]
 license = "MIT"
@@ -78,7 +78,7 @@ python_functions = ["test_*"]
 addopts = "-v --cov=avcardtool --cov-report=term-missing"
 
 [tool.bumpversion]
-current_version = "1.4.7"
+current_version = "1.4.8"
 commit = true
 tag = true
 allow_dirty = true
