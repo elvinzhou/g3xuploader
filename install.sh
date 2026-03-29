@@ -74,7 +74,7 @@ fi
 # ---------------------------------------------------------------------------
 echo "[1/6] Installing system dependencies..."
 apt-get update -qq
-apt-get install -y python3 python3-pip python3-venv udev util-linux
+apt-get install -y python3 python3-pip python3-venv udev util-linux fatattr
 echo "Done"
 
 # ---------------------------------------------------------------------------

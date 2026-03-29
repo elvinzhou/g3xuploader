@@ -134,6 +134,21 @@ def get_mount_point(device_path: Path) -> Optional[Path]:
     return None
 
 
+def _is_mounted_readonly(device_path: Path) -> bool:
+    """Return True if the device is currently mounted read-only."""
+    try:
+        result = subprocess.run(
+            ['findmnt', '-n', '-o', 'OPTIONS', str(device_path)],
+            capture_output=True, text=True, check=False,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            opts = result.stdout.strip().split(',')
+            return 'ro' in opts
+    except Exception:
+        pass
+    return False
+
+
 def resolve_device_mount_point(device_path: Path, readonly: bool = True) -> Path:
     """
     Resolve a block device to its mount point, waiting briefly for udisks2 if needed.
@@ -141,6 +156,10 @@ def resolve_device_mount_point(device_path: Path, readonly: bool = True) -> Path
     1. Checks if the device is already mounted.
     2. If not, waits 2 seconds (udisks2 may still be mounting) and retries.
     3. If still not mounted, mounts it via udisksctl (no root required).
+
+    When readonly=False and the device is already mounted read-only (e.g. udisks2
+    auto-mounted a FAT volume with a dirty bit), the existing mount is unmounted
+    and the device is remounted read-write.
 
     Args:
         device_path: Block device path (e.g., /dev/sda1)
@@ -154,14 +173,24 @@ def resolve_device_mount_point(device_path: Path, readonly: bool = True) -> Path
     """
     import time as _time
 
+    def _check_and_fix(mount: Path) -> Path:
+        if not readonly and _is_mounted_readonly(device_path):
+            logger.info(
+                f"{device_path} is mounted read-only but write access is needed — "
+                f"remounting read-write"
+            )
+            unmount_device(mount)
+            return mount_device(device_path, readonly=False)
+        return mount
+
     mount = get_mount_point(device_path)
     if mount:
-        return mount
+        return _check_and_fix(mount)
 
     _time.sleep(2)
     mount = get_mount_point(device_path)
     if mount:
-        return mount
+        return _check_and_fix(mount)
 
     return mount_device(device_path, readonly=readonly)
 
