@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Optional
 import subprocess
 
+logger = logging.getLogger(__name__)
+
 
 def setup_logging(log_file: Optional[str] = None, log_level: str = "INFO") -> None:
     """
@@ -190,6 +192,12 @@ def mount_device(device_path: Path, mount_point: Optional[Path] = None, readonly
         m = re.search(r'at\s+(\S+?)\.?$', result.stdout.strip())
         if m:
             return Path(m.group(1))
+        logger.warning(f"udisksctl mount succeeded but could not parse mount point from: {result.stdout.strip()!r}")
+    else:
+        logger.warning(
+            f"udisksctl mount failed for {device_path} (rc={result.returncode}): "
+            f"{(result.stderr or result.stdout).strip()}"
+        )
 
     # Fallback: direct mount (requires root / appropriate permissions)
     if mount_point is None:
