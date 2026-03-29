@@ -2363,6 +2363,11 @@ def _update_system_files(ctx: click.Context, version: Optional[str]) -> None:
             "dest": Path("/lib/systemd/system/avcardtool-navdata@.service"),
             "substitute": True,
         },
+        {
+            "url": f"{base_url}/systemd/99-avcardtool.rules",
+            "dest": Path("/etc/polkit-1/rules.d/99-avcardtool.rules"),
+            "substitute": True,
+        },
     ]
 
     click.echo("\nUpdating system files...")

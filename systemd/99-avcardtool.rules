@@ -1,0 +1,20 @@
+/* polkit rules for avcardtool
+ *
+ * Allows the avcardtool service user to mount and unmount removable
+ * block devices via udisks2 without interactive authentication.
+ * Required because the systemd service has no TTY for polkit prompts.
+ *
+ * Installation:
+ *   sudo cp 99-avcardtool.rules /etc/polkit-1/rules.d/
+ */
+polkit.addRule(function(action, subject) {
+    var mountActions = [
+        "org.freedesktop.udisks2.filesystem-mount",
+        "org.freedesktop.udisks2.filesystem-mount-system",
+        "org.freedesktop.udisks2.filesystem-unmount-others",
+    ];
+    if (mountActions.indexOf(action.id) !== -1 &&
+            subject.user === "AVCARDTOOL_USER") {
+        return polkit.Result.YES;
+    }
+});

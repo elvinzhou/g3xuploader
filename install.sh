@@ -163,9 +163,9 @@ done
 echo "Done"
 
 # ---------------------------------------------------------------------------
-# Step 5: udev rules  (requires root — stays system-level)
+# Step 5: udev rules + polkit  (requires root — stays system-level)
 # ---------------------------------------------------------------------------
-echo "[5/6] Installing udev rules..."
+echo "[5/6] Installing udev rules and polkit policy..."
 
 UDEV_RULE_PATH="/etc/udev/rules.d/99-avcardtool-sdcard.rules"
 
@@ -187,6 +187,19 @@ rm -f /etc/udev/rules.d/99-g3x-db-sdcard.rules
 
 udevadm control --reload-rules
 udevadm trigger
+
+# polkit rule: allow service user to mount/unmount via udisks2 without a TTY
+POLKIT_RULE_PATH="/etc/polkit-1/rules.d/99-avcardtool.rules"
+if [ -f "systemd/99-avcardtool.rules" ]; then
+    sed "s|AVCARDTOOL_USER|${REAL_USER}|g" \
+        systemd/99-avcardtool.rules > "$POLKIT_RULE_PATH"
+else
+    echo "Downloading polkit rules from GitHub..."
+    curl -sSL \
+        "https://raw.githubusercontent.com/elvinzhou/g3xuploader/v${INSTALL_VERSION}/systemd/99-avcardtool.rules" \
+        | sed "s|AVCARDTOOL_USER|${REAL_USER}|g" > "$POLKIT_RULE_PATH"
+fi
+chmod 644 "$POLKIT_RULE_PATH"
 
 echo "Done"
 
