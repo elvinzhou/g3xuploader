@@ -511,7 +511,11 @@ class TAWExtractor:
                 
                 # Create parent directories
                 output_path.parent.mkdir(parents=True, exist_ok=True)
-                
+
+                # Clear FAT read-only before overwriting (EROFS on FAT32 otherwise)
+                if output_path.exists():
+                    _clear_readonly(output_path)
+
                 # Extract and write data
                 try:
                     data = self.parser.extract_region(f, region)

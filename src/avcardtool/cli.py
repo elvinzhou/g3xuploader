@@ -1400,6 +1400,8 @@ def navdata_install(ctx, sd_card: Optional[Path], from_dir: Optional[Path], yes:
                 if target.is_dir():
                     shutil.rmtree(target)
                 else:
+                    from avcardtool.navdata.garmin.taw_parser import _clear_readonly
+                    _clear_readonly(target)
                     target.unlink()
                 click.echo(f"  Removed: {clean}")
 
@@ -1502,8 +1504,10 @@ def navdata_install(ctx, sd_card: Optional[Path], from_dir: Optional[Path], yes:
 
             click.echo(f"  Copying  {local_path.name}  → {dest_path.relative_to(sd_card)}")
             dest_path.parent.mkdir(parents=True, exist_ok=True)
+            from avcardtool.navdata.garmin.taw_parser import _set_hidden, _clear_readonly
+            if dest_path.exists():
+                _clear_readonly(dest_path)
             shutil.copy2(local_path, dest_path)
-            from avcardtool.navdata.garmin.taw_parser import _set_hidden
             _set_hidden(dest_path)
             installed_files.append(dest_path)
 
