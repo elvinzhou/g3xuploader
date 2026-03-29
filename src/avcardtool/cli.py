@@ -1890,6 +1890,8 @@ def navdata_auto_update(ctx, device: Optional[Path]):
     # ---------------------------------------------------------------
     # Process each card
     # ---------------------------------------------------------------
+    issues: list = []  # (severity, message) pairs collected for end-of-run summary
+
     for card in cards:
         if not card.mount_point:
             _log.info(f"Skipping {card.device_path}: not mounted")
@@ -2055,12 +2057,16 @@ def navdata_auto_update(ctx, device: Optional[Path]):
             try:
                 api.unlock(s.series_id, issue.name, target_dev.device_id, card_serial, batch_id=batch_id)
             except Exception as e:
-                _log.warning(f"  Unlock failed for {cache_key}: {e}")
+                msg = f"Unlock failed for {cache_key}: {e}"
+                _log.warning(f"  {msg}")
+                issues.append(("WARNING", msg))
 
             try:
                 issue_files = api.list_files(s.series_id, issue.name)
             except Exception as e:
-                _log.error(f"  list_files failed for {cache_key}: {e}")
+                msg = f"File list failed for {cache_key}: {e}"
+                _log.error(f"  {msg}")
+                issues.append(("ERROR", msg))
                 _release_dl_slot(cache_dir, cache_key, [], {}, [], avdb.type_id, s.series_id, success=False)
                 continue
 
@@ -2100,7 +2106,9 @@ def navdata_auto_update(ctx, device: Optional[Path]):
                         "taw_database_type": taw_db_type,
                     })
                 except Exception as e:
-                    _log.error(f"  Download failed for {db_file.file_name}: {e}")
+                    msg = f"Download failed for {db_file.file_name}: {e}"
+                    _log.error(f"  {msg}")
+                    issues.append(("ERROR", msg))
 
             # Extract per-feature CRCs from the downloaded TAW files (fast path:
             # read last 4 bytes of each raw region — no full extraction needed).
@@ -2147,9 +2155,25 @@ def navdata_auto_update(ctx, device: Optional[Path]):
             ctx.invoke(navdata_install, sd_card=mount, from_dir=card_dir, yes=True)
         except SystemExit as e:
             if e.code != 0:
-                _log.error(f"  Install failed (exit {e.code})")
+                msg = f"Install failed for card at {mount} (exit {e.code})"
+                _log.error(f"  {msg}")
+                issues.append(("ERROR", msg))
         except Exception as e:
-            _log.error(f"  Install raised: {e}")
+            msg = f"Install raised for card at {mount}: {e}"
+            _log.error(f"  {msg}")
+            issues.append(("ERROR", msg))
+
+    # ---------------------------------------------------------------
+    # End-of-run summary
+    # ---------------------------------------------------------------
+    if issues:
+        _log.error("=" * 60)
+        _log.error("NAVDATA UPDATE COMPLETED WITH ISSUES (%d):", len(issues))
+        for severity, msg in issues:
+            _log.error("  [%s] %s", severity, msg)
+        _log.error("=" * 60)
+    else:
+        _log.info("Navdata update completed successfully.")
 
     if _we_mounted:
         try:

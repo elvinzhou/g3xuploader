@@ -365,7 +365,8 @@ class FlyGarminAPI:
             auth_header = self._auth_headers()
 
         params: dict = {"deviceIDs": device_id}
-        if card_serial and card_serial != "0":
+        sent_card_serial = card_serial and card_serial != "0"
+        if sent_card_serial:
             params["cardSerial"] = card_serial
 
         resp = self._session.get(
@@ -374,6 +375,21 @@ class FlyGarminAPI:
             headers=auth_header,
             timeout=30,
         )
+
+        # Some series (e.g. Airport Directory) reject cardSerial with 400.
+        # Retry without it so the caller doesn't need to know which series care.
+        if resp.status_code == 400 and sent_card_serial:
+            logger.debug(
+                f"unlock {series_id}/{issue_name}: 400 with cardSerial — retrying without"
+            )
+            params.pop("cardSerial", None)
+            resp = self._session.get(
+                f"{FLYGARMIN_API}/avdb-series/{series_id}/{issue_name}/unlock/",
+                params=params,
+                headers=auth_header,
+                timeout=30,
+            )
+
         resp.raise_for_status()
         return resp.json()
 
