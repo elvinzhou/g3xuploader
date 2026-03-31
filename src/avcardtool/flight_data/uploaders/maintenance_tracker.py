@@ -4,8 +4,10 @@ Maintenance Tracker flight data uploader.
 Generic webhook uploader for maintenance tracking systems.
 """
 
+import json
 import logging
 import requests
+from pathlib import Path
 from typing import Optional
 
 from avcardtool.flight_data.base import FlightData, FlightDataUploader, UploadResult
@@ -78,6 +80,24 @@ class MaintenanceTrackerUploader(FlightDataUploader):
                 message="Maintenance tracker upload not enabled"
             )
 
+        # Build the payload (needed for debug save and actual upload)
+        payload = {
+            "aircraft_ident": analysis_results.get('aircraft_ident') if analysis_results else None,
+            "date": analysis_results.get('date') if analysis_results else None,
+            "file_path": str(flight_data.file_path),
+            "file_hash": flight_data.file_hash,
+            "hobbs": analysis_results.get('hobbs') if analysis_results else None,
+            "tach": analysis_results.get('tach') if analysis_results else None,
+            "oooi": analysis_results.get('oooi') if analysis_results else None,
+            "metrics": analysis_results.get('metrics') if analysis_results else None
+        }
+
+        # In debug mode, save the exact payload regardless of credentials
+        if self.debug:
+            debug_filename = f"maintenance_tracker_{Path(flight_data.file_path).stem}.json"
+            self._save_debug_payload(debug_filename, json.dumps(payload, indent=2, default=str))
+            logger.info(f"[DEBUG] Maintenance Tracker payload saved: {debug_filename}")
+
         if not self.url or not self.api_key:
             return UploadResult(
                 success=False,
@@ -99,18 +119,6 @@ class MaintenanceTrackerUploader(FlightDataUploader):
             }
             # Add any custom headers
             headers.update(self.custom_headers)
-
-            # Build payload from analysis results
-            payload = {
-                "aircraft_ident": analysis_results.get('aircraft_ident'),
-                "date": analysis_results.get('date'),
-                "file_path": str(flight_data.file_path),
-                "file_hash": flight_data.file_hash,
-                "hobbs": analysis_results.get('hobbs'),
-                "tach": analysis_results.get('tach'),
-                "oooi": analysis_results.get('oooi'),
-                "metrics": analysis_results.get('metrics')
-            }
 
             response = requests.post(
                 self.url,

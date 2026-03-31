@@ -222,6 +222,21 @@ class FlyStoUploader(FlightDataUploader):
             logger.error(error_msg)
             return False, error_msg
 
+    def _build_zip_payload(self, flight_data: FlightData) -> bytes:
+        """Build the ZIP payload that would be sent to FlySto."""
+        with tempfile.NamedTemporaryFile(suffix='.zip', delete=False) as tmp_zip:
+            zip_path = tmp_zip.name
+        try:
+            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+                zf.write(flight_data.file_path, Path(flight_data.file_path).name)
+            with open(zip_path, 'rb') as f:
+                return f.read()
+        finally:
+            try:
+                os.unlink(zip_path)
+            except OSError:
+                pass
+
     def upload_flight(
         self,
         flight_data: FlightData,
@@ -245,6 +260,16 @@ class FlyStoUploader(FlightDataUploader):
                 service=self.SERVICE_NAME,
                 message="FlySto upload not enabled"
             )
+
+        # In debug mode, build and save the exact payload regardless of credentials
+        if self.debug:
+            try:
+                zip_content = self._build_zip_payload(flight_data)
+                debug_filename = f"flysto_{Path(flight_data.file_path).stem}.zip"
+                self._save_debug_payload(debug_filename, zip_content)
+                logger.info(f"[DEBUG] FlySto payload saved: {debug_filename} ({len(zip_content)} bytes, contains {Path(flight_data.file_path).name})")
+            except Exception as e:
+                logger.warning(f"[DEBUG] Could not build FlySto debug payload: {e}")
 
         if not self.client_id or not self.client_secret:
             return UploadResult(
@@ -277,79 +302,61 @@ class FlyStoUploader(FlightDataUploader):
             )
 
         try:
-            # Create a ZIP file containing the CSV
-            with tempfile.NamedTemporaryFile(suffix='.zip', delete=False) as tmp_zip:
-                zip_path = tmp_zip.name
+            zip_content = self._build_zip_payload(flight_data)
 
-            try:
-                # Create ZIP with the CSV file
-                with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
-                    zf.write(flight_data.file_path, Path(flight_data.file_path).name)
+            response = requests.post(
+                self.UPLOAD_URL,
+                headers={
+                    'Authorization': f'Bearer {self.access_token}',
+                    'Content-Type': 'application/zip'
+                },
+                data=zip_content,
+                timeout=120
+            )
 
-                # Upload the ZIP file
-                with open(zip_path, 'rb') as f:
-                    zip_content = f.read()
-
-                response = requests.post(
-                    self.UPLOAD_URL,
-                    headers={
-                        'Authorization': f'Bearer {self.access_token}',
-                        'Content-Type': 'application/zip'
-                    },
-                    data=zip_content,
-                    timeout=120
+            if response.status_code in [200, 201]:
+                logger.info(f"Successfully uploaded to FlySto: {flight_data.file_path.name}")
+                return UploadResult(
+                    success=True,
+                    service=self.SERVICE_NAME,
+                    message="Upload successful"
                 )
-
-                if response.status_code in [200, 201]:
-                    logger.info(f"Successfully uploaded to FlySto: {flight_data.file_path.name}")
-                    return UploadResult(
-                        success=True,
-                        service=self.SERVICE_NAME,
-                        message="Upload successful"
+            elif response.status_code == 401:
+                # Token might have expired, try refreshing
+                if self._refresh_access_token():
+                    # Retry upload with new token
+                    response = requests.post(
+                        self.UPLOAD_URL,
+                        headers={
+                            'Authorization': f'Bearer {self.access_token}',
+                            'Content-Type': 'application/zip'
+                        },
+                        data=zip_content,
+                        timeout=120
                     )
-                elif response.status_code == 401:
-                    # Token might have expired, try refreshing
-                    if self._refresh_access_token():
-                        # Retry upload with new token
-                        response = requests.post(
-                            self.UPLOAD_URL,
-                            headers={
-                                'Authorization': f'Bearer {self.access_token}',
-                                'Content-Type': 'application/zip'
-                            },
-                            data=zip_content,
-                            timeout=120
+                    if response.status_code in [200, 201]:
+                        logger.info(f"Successfully uploaded to FlySto (after token refresh): {flight_data.file_path.name}")
+                        return UploadResult(
+                            success=True,
+                            service=self.SERVICE_NAME,
+                            message="Upload successful (after token refresh)"
                         )
-                        if response.status_code in [200, 201]:
-                            logger.info(f"Successfully uploaded to FlySto (after token refresh): {flight_data.file_path.name}")
-                            return UploadResult(
-                                success=True,
-                                service=self.SERVICE_NAME,
-                                message="Upload successful (after token refresh)"
-                            )
 
-                    error_msg = f"Authentication failed: {response.status_code}"
-                    logger.error(f"FlySto {error_msg}")
-                    return UploadResult(
-                        success=False,
-                        service=self.SERVICE_NAME,
-                        message=error_msg
-                    )
-                else:
-                    error_msg = f"Upload failed: {response.status_code} - {response.text}"
-                    logger.error(f"FlySto {error_msg}")
-                    return UploadResult(
-                        success=False,
-                        service=self.SERVICE_NAME,
-                        message=error_msg
-                    )
-
-            finally:
-                # Clean up temp ZIP file
-                try:
-                    os.unlink(zip_path)
-                except OSError:
-                    pass
+                error_msg = f"Authentication failed: {response.status_code}"
+                logger.error(f"FlySto {error_msg}")
+                return UploadResult(
+                    success=False,
+                    service=self.SERVICE_NAME,
+                    message=error_msg
+                )
+            else:
+                error_msg = f"Upload failed: {response.status_code} - {response.text}"
+                logger.error(f"FlySto {error_msg}")
+                return UploadResult(
+                    success=False,
+                    service=self.SERVICE_NAME,
+                    message=error_msg
+                )
 
         except Exception as e:
             error_msg = f"Upload error: {str(e)}"

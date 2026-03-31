@@ -6,7 +6,8 @@ This module defines the interface that all upload service integrations must impl
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Optional, Dict, Any
+from pathlib import Path
+from typing import Optional, Dict, Any, Union
 import logging
 
 from avcardtool.flight_data.base.processor import FlightData
@@ -59,6 +60,7 @@ class FlightDataUploader(ABC):
         self.config = config
         self.enabled = config.get('enabled', False)
         self.debug = config.get('debug', False)
+        self.data_dir = config.get('data_dir', '/var/lib/avcardtool')
 
     @abstractmethod
     def authenticate(self) -> bool:
@@ -158,6 +160,25 @@ class FlightDataUploader(ABC):
             data.update(analysis_results)
 
         return data
+
+    def _save_debug_payload(self, filename: str, content: Union[bytes, str]) -> None:
+        """
+        Save a payload to the debug directory for inspection.
+
+        Args:
+            filename: Name of the file to save (e.g. 'flysto_log.zip')
+            content: Bytes or string content to write
+        """
+        try:
+            debug_dir = Path(self.data_dir) / 'debug'
+            debug_dir.mkdir(parents=True, exist_ok=True)
+            dest = debug_dir / filename
+            mode = 'wb' if isinstance(content, bytes) else 'w'
+            with open(dest, mode) as f:
+                f.write(content)
+            logger.debug(f"[DEBUG] Saved payload to {dest}")
+        except Exception as e:
+            logger.warning(f"Could not save debug payload: {e}")
 
     def should_upload(self, flight_data: FlightData) -> bool:
         """

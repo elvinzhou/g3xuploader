@@ -507,6 +507,7 @@ def auto_process(ctx, path: Path, service: tuple, skip_uploads: bool):
 
     # Initialize processed files database
     db_path = Path(cfg.system.data_dir) / 'processed_files.json'
+    is_first_run = not db_path.exists()
     processed_db = ProcessedFilesDatabase(db_path)
 
     # Find all G3X CSV files
@@ -530,6 +531,32 @@ def auto_process(ctx, path: Path, service: tuple, skip_uploads: bool):
         sys.exit(0)
 
     click.echo(f"Found {len(log_files)} log file(s)\n")
+
+    # On the very first run, optionally mark all existing files as historical
+    # so they are skipped rather than uploaded (prevents flooding services with
+    # flight history the user has already seen).
+    if is_first_run and cfg.system.mark_historical_on_first_run:
+        click.echo(f"First run: marking {len(log_files)} existing file(s) as historical (skipping uploads)")
+        for log_file in log_files:
+            file_hash = hash_file(log_file)
+
+            # Try to extract a fingerprint so that the same flight recorded by
+            # other display units on later SD card insertions is also skipped.
+            fingerprint = None
+            for ProcessorClass in PROCESSORS:
+                proc = ProcessorClass()
+                if proc.detect_log_format(log_file):
+                    try:
+                        flight_data = proc.parse_log(log_file)
+                        fingerprint = flight_data.flight_fingerprint()
+                    except Exception:
+                        pass
+                    break
+
+            processed_db.mark_historical(file_hash, log_file, fingerprint)
+            click.echo(f"  ⊙ {log_file.name}" + (f"  [{fingerprint}]" if fingerprint else ""))
+        click.echo("\nDone. Only flights recorded after this point will be uploaded.")
+        sys.exit(0)
 
     upload_services = list(service) if service else []
 
@@ -582,6 +609,20 @@ def auto_process(ctx, path: Path, service: tuple, skip_uploads: bool):
                 )
                 continue
 
+            # Check for duplicate flight from another display unit on the same aircraft
+            fingerprint = flight_data.flight_fingerprint()
+            if fingerprint and processed_db.is_duplicate_flight(fingerprint):
+                click.echo(f"  ⊙ Duplicate flight from another display unit (skipped uploads)")
+                stats['already_processed'] += 1
+                processed_db.mark_processed(
+                    file_hash,
+                    log_file,
+                    analysis.aircraft_ident,
+                    True,
+                    flight_fingerprint=fingerprint
+                )
+                continue
+
             stats['flights'] += 1
             click.echo(f"  ✓ Flight detected: {analysis.aircraft_ident}")
             click.echo(f"    Hobbs: +{analysis.hobbs.increment_hours:.2f}h, Tach: +{analysis.tach.increment_hours:.2f}h")
@@ -592,7 +633,8 @@ def auto_process(ctx, path: Path, service: tuple, skip_uploads: bool):
                     file_hash,
                     log_file,
                     analysis.aircraft_ident,
-                    True
+                    True,
+                    flight_fingerprint=fingerprint
                 )
                 continue
 
@@ -643,7 +685,8 @@ def auto_process(ctx, path: Path, service: tuple, skip_uploads: bool):
                 log_file,
                 analysis.aircraft_ident,
                 True,
-                upload_results
+                upload_results,
+                flight_fingerprint=fingerprint
             )
 
         except Exception as e:
@@ -2180,6 +2223,346 @@ def navdata_auto_update(ctx, device: Optional[Path]):
             detector.unmount_card(_we_mounted)
         except Exception as e:
             _log.warning(f"Could not unmount {_we_mounted}: {e}")
+
+
+# ============================================================================
+# Setup Wizard
+# ============================================================================
+
+@cli.command('setup')
+@click.option(
+    '--config-path',
+    type=click.Path(path_type=Path),
+    default=None,
+    help='Where to write the config file (default: ~/.config/avcardtool/config.json or /etc/avcardtool/config.json when root)'
+)
+@click.pass_context
+def setup_wizard(ctx, config_path: Optional[Path]):
+    """
+    Interactive post-install setup wizard.
+
+    Walks through enabling flight log processing, navigation database updates,
+    upload service credentials, and first-run behavior, then writes a config
+    file ready for use.
+    """
+    from avcardtool.core.config import (
+        Config, SystemConfig, FlightDataConfig, NavdataConfig,
+        EngineTimeConfig, AirframeTimeConfig, UploaderConfig
+    )
+
+    click.echo("\n" + "=" * 60)
+    click.echo("  avcardtool setup wizard")
+    click.echo("=" * 60)
+    click.echo(
+        "\nThis wizard will help you configure avcardtool.\n"
+        "Press Enter to accept defaults shown in [brackets].\n"
+    )
+
+    # ------------------------------------------------------------------
+    # Section 1: System settings
+    # ------------------------------------------------------------------
+    click.echo("── System Settings ───────────────────────────────────────")
+
+    default_data_dir = str(Path.home() / ".local" / "share" / "avcardtool")
+    data_dir = click.prompt("Data directory", default=default_data_dir)
+    enable_debug = click.confirm("Enable debug mode?", default=False)
+
+    # ------------------------------------------------------------------
+    # Section 2: Flight log processing
+    # ------------------------------------------------------------------
+    click.echo("\n── Flight Log Processing ─────────────────────────────────")
+    click.echo(
+        "\nWhen an SD card is inserted, avcardtool can automatically parse your\n"
+        "G3X flight logs, calculate Hobbs and Tach times, detect OOOI events,\n"
+        "and upload to configured tracking services.\n"
+    )
+
+    auto_process_flights = click.confirm(
+        "Enable automatic flight log processing?", default=True
+    )
+
+    uploaders = {}
+    engine_time_cfg = EngineTimeConfig()
+    airframe_time_cfg = AirframeTimeConfig()
+
+    if auto_process_flights:
+        # --- Hobbs / Tach settings ---
+        click.echo("\n  Log Processing Settings:")
+        click.echo("  (These affect how Hobbs and Tach times are calculated.)\n")
+
+        hobbs_trigger = click.prompt(
+            "  Hobbs time trigger",
+            type=click.Choice(['oil_pressure', 'rpm', 'flight_time']),
+            default='oil_pressure',
+            show_choices=True
+        )
+        airframe_time_cfg.trigger = hobbs_trigger
+
+        tach_mode = click.prompt(
+            "  Tach time mode\n"
+            "    variable = time accrues at RPM/redline ratio (most common)\n"
+            "    fixed    = 1:1 with clock whenever engine is running\n"
+            "  Mode",
+            type=click.Choice(['variable', 'fixed']),
+            default='variable',
+            show_choices=True
+        )
+        engine_time_cfg.mode = tach_mode
+
+        if tach_mode == 'variable':
+            engine_time_cfg.reference_rpm = click.prompt(
+                "  Engine redline RPM", default=2700
+            )
+
+        # --- Upload services ---
+        click.echo("\n  Upload Services:")
+        click.echo("  Configure where to send your flight data after each flight.\n")
+
+        # CloudAhoy
+        click.echo("  CloudAhoy (https://www.cloudahoy.com)")
+        if click.confirm("    Enable CloudAhoy?", default=False):
+            api_token = click.prompt("    API token")
+            uploaders['cloudahoy'] = UploaderConfig(
+                enabled=True,
+                config={'enabled': True, 'api_token': api_token}
+            )
+            click.echo("    ✓ CloudAhoy configured")
+        else:
+            uploaders['cloudahoy'] = UploaderConfig(
+                enabled=False, config={'enabled': False, 'api_token': ''}
+            )
+
+        click.echo("")
+
+        # FlySto
+        click.echo("  FlySto (https://www.flysto.net)")
+        if click.confirm("    Enable FlySto?", default=False):
+            client_id = click.prompt("    Client ID")
+            client_secret = _prompt_password("    Client Secret: ")
+            redirect_uri = click.prompt(
+                "    Redirect URI", default="http://localhost:8080/callback"
+            )
+
+            flysto_config = {
+                'enabled': True,
+                'client_id': client_id,
+                'client_secret': client_secret,
+                'redirect_uri': redirect_uri,
+                'data_dir': data_dir,
+            }
+
+            click.echo("\n    To authorize FlySto, open this URL in your browser:")
+            auth_url = (
+                f"https://www.flysto.net/oauth/authorize?"
+                f"response_type=code&client_id={client_id}&redirect_uri={redirect_uri}"
+            )
+            click.echo(f"    {auth_url}")
+            click.echo(
+                "\n    After granting permission you will be redirected to your\n"
+                "    redirect URI with a 'code' parameter.\n"
+            )
+
+            if click.confirm("    Authorize now?", default=True):
+                auth_code = click.prompt("    Paste the authorization code")
+                from avcardtool.flight_data.uploaders.flysto import FlyStoUploader
+                tmp_uploader = FlyStoUploader(flysto_config)
+                success, message = tmp_uploader.exchange_code_for_tokens(auth_code)
+                if success:
+                    click.echo("    ✓ FlySto authorized successfully")
+                else:
+                    click.echo(f"    ✗ Authorization failed: {message}")
+                    click.echo(
+                        "    Authorize later with:\n"
+                        "      avcardtool flight flysto-auth <code>"
+                    )
+            else:
+                click.echo(
+                    "    Authorize later with:\n"
+                    "      avcardtool flight flysto-auth <code>"
+                )
+
+            uploaders['flysto'] = UploaderConfig(
+                enabled=True,
+                config={k: v for k, v in flysto_config.items() if k != 'data_dir'}
+            )
+        else:
+            uploaders['flysto'] = UploaderConfig(
+                enabled=False,
+                config={'enabled': False, 'client_id': '', 'client_secret': ''}
+            )
+
+        click.echo("")
+
+        # Savvy Aviation
+        click.echo("  Savvy Aviation (https://www.savvyaviation.com)")
+        click.echo("    Note: no public API — files are staged locally for manual upload.")
+        if click.confirm("    Enable Savvy Aviation staging?", default=False):
+            uploaders['savvy_aviation'] = UploaderConfig(
+                enabled=True, config={'enabled': True}
+            )
+            click.echo("    ✓ Savvy Aviation staging enabled")
+        else:
+            uploaders['savvy_aviation'] = UploaderConfig(
+                enabled=False, config={'enabled': False}
+            )
+
+        click.echo("")
+
+        # Maintenance Tracker
+        click.echo("  Maintenance Tracker (custom webhook)")
+        if click.confirm("    Enable Maintenance Tracker?", default=False):
+            tracker_url = click.prompt("    Webhook URL")
+            tracker_key = click.prompt("    API key")
+            uploaders['maintenance_tracker'] = UploaderConfig(
+                enabled=True,
+                config={'enabled': True, 'url': tracker_url, 'api_key': tracker_key}
+            )
+            click.echo("    ✓ Maintenance Tracker configured")
+        else:
+            uploaders['maintenance_tracker'] = UploaderConfig(
+                enabled=False, config={'enabled': False, 'url': '', 'api_key': ''}
+            )
+
+        # --- First-run behavior ---
+        click.echo("\n  First-Run Behavior:")
+        click.echo(
+            "\n  When you insert your SD card for the first time, avcardtool will\n"
+            "  find all existing log files — potentially months of flight history.\n"
+            "  Services like FlySto don't deduplicate, so uploading everything at\n"
+            "  once could flood your account with old flights.\n"
+        )
+        mark_historical = click.confirm(
+            "  Mark all existing files as already processed on first SD card use?\n"
+            "  (Recommended: only flights recorded after this setup will be uploaded)",
+            default=True
+        )
+    else:
+        mark_historical = False
+
+    # ------------------------------------------------------------------
+    # Section 3: Navigation database auto-update
+    # ------------------------------------------------------------------
+    click.echo("\n── Navigation Database Auto-Update ───────────────────────")
+    click.echo(
+        "\nWhen an SD card is inserted, avcardtool can check for and install\n"
+        "updated Garmin NavData, terrain, obstacle, and chart databases\n"
+        "automatically using your flyGarmin account.\n"
+    )
+
+    auto_update_navdata = click.confirm(
+        "Enable automatic navigation database updates?", default=True
+    )
+
+    navdata_garmin = {}
+
+    if auto_update_navdata:
+        click.echo(
+            "\n  Log in to flyGarmin to authorize database downloads.\n"
+            "  Your credentials are stored locally as a token — your\n"
+            "  password is not saved.\n"
+        )
+        from avcardtool.navdata.garmin.auth import GarminAuth, GarminAuthError
+
+        garmin_email = click.prompt("  flyGarmin email")
+        garmin_password = _prompt_password("  flyGarmin password: ")
+
+        auth = GarminAuth(token_dir=Path(data_dir))
+
+        def _mfa_callback():
+            click.echo("\n" + "!" * 40)
+            click.echo("  Multi-Factor Authentication Required")
+            click.echo("!" * 40)
+            return click.prompt("  Verification code")
+
+        try:
+            click.echo(f"\n  Logging in as {garmin_email}...")
+            success = auth.login(garmin_email, garmin_password, mfa_callback=_mfa_callback)
+            if success:
+                click.echo(f"  ✓ Logged in as {auth.tokens.display_name}. Token saved.")
+                navdata_garmin['email'] = garmin_email
+                navdata_garmin['databases'] = ['navdata', 'terrain', 'obstacles']
+        except GarminAuthError as e:
+            click.echo(f"  ✗ Login failed: {e}")
+            click.echo(
+                "  Navigation database auto-update will be disabled.\n"
+                "  You can log in later with: avcardtool navdata login"
+            )
+            auto_update_navdata = False
+        except Exception as e:
+            click.echo(f"  ✗ Unexpected error: {e}")
+            auto_update_navdata = False
+
+    # ------------------------------------------------------------------
+    # Section 4: Save configuration
+    # ------------------------------------------------------------------
+    click.echo("\n── Saving Configuration ──────────────────────────────────")
+
+    if config_path is None:
+        if os.geteuid() == 0:
+            default_path = Path("/etc/avcardtool/config.json")
+        else:
+            default_path = Path.home() / ".config" / "avcardtool" / "config.json"
+        config_path = Path(
+            click.prompt("Config file path", default=str(default_path))
+        )
+
+    if config_path.exists():
+        if not click.confirm(
+            f"\n  {config_path} already exists. Overwrite?",
+            default=False
+        ):
+            click.echo("Aborted — no changes written.")
+            sys.exit(0)
+
+    # Build config
+    cfg = Config.__new__(Config)
+    cfg.config_path = config_path
+
+    cfg.flight_data = FlightDataConfig()
+    cfg.flight_data.enabled = auto_process_flights
+    cfg.flight_data.engine_time = engine_time_cfg
+    cfg.flight_data.airframe_time = airframe_time_cfg
+    cfg.flight_data.uploaders = uploaders
+
+    cfg.navdata = NavdataConfig()
+    cfg.navdata.enabled = auto_update_navdata
+    cfg.navdata.auto_download = auto_update_navdata
+    cfg.navdata.garmin = navdata_garmin
+
+    cfg.system = SystemConfig()
+    cfg.system.data_dir = data_dir
+    cfg.system.log_file = str(Path(data_dir) / "avcardtool.log")
+    cfg.system.debug = enable_debug
+    cfg.system.mark_historical_on_first_run = mark_historical
+    cfg.system.auto_process_flights = auto_process_flights
+    cfg.system.auto_update_navdata = auto_update_navdata
+
+    try:
+        cfg.save(config_path)
+        click.echo(f"\n  ✓ Configuration saved to {config_path}")
+    except Exception as e:
+        click.echo(f"\n  ✗ Failed to save configuration: {e}", err=True)
+        sys.exit(1)
+
+    click.echo("\n" + "=" * 60)
+    click.echo("Setup complete!")
+    click.echo("=" * 60)
+
+    if auto_process_flights or auto_update_navdata:
+        click.echo("\nEnabled features:")
+        if auto_process_flights:
+            click.echo("  ✓ Flight log processing")
+        if auto_update_navdata:
+            click.echo("  ✓ Navigation database auto-update")
+        click.echo("\nInsert your SD card to trigger both.")
+        click.echo("Monitor progress:")
+        click.echo('  journalctl -u "avcardtool-*@*" -f')
+    else:
+        click.echo(
+            "\nNo automated features were enabled.\n"
+            "Re-run 'avcardtool setup' or edit the config to change this."
+        )
+    click.echo("")
 
 
 # ============================================================================

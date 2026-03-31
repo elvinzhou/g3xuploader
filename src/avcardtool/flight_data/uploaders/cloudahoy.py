@@ -79,6 +79,20 @@ class CloudAhoyUploader(FlightDataUploader):
                 message="CloudAhoy upload not enabled"
             )
 
+        # In debug mode, save the exact payload regardless of credentials
+        if self.debug:
+            debug_payload = {
+                "METADATA": {
+                    "importerVersion": "avcardtool_v2.0",
+                    "tail": flight_data.metadata.aircraft_ident
+                },
+                "IMPORT_file": str(flight_data.file_path),
+                "IMPORT_content_type": "text/csv"
+            }
+            debug_filename = f"cloudahoy_{Path(flight_data.file_path).stem}.json"
+            self._save_debug_payload(debug_filename, json.dumps(debug_payload, indent=2))
+            logger.info(f"[DEBUG] CloudAhoy payload saved: {debug_filename}")
+
         if not self.api_token:
             return UploadResult(
                 success=False,

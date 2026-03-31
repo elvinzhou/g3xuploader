@@ -10,7 +10,9 @@
       "WebSearch",
       "WebFetch(domain:github.com)",
       "Bash(curl:*)",
-      "Bash(sort ls:*)"
+      "Bash(sort ls:*)",
+      "Bash(python:*)",
+      "Bash(pip show:*)"
     ]
   }
 }

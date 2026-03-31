@@ -57,7 +57,7 @@ class ProcessedFilesDatabase:
 
     def is_processed(self, file_hash: str) -> bool:
         """
-        Check if a file has already been processed.
+        Check if a file has already been processed by its hash.
 
         Args:
             file_hash: SHA256 hash of the file
@@ -67,6 +67,30 @@ class ProcessedFilesDatabase:
         """
         data = self._load()
         return file_hash in data.get('processed', {})
+
+    def is_duplicate_flight(self, fingerprint: str) -> bool:
+        """
+        Check whether a flight with this fingerprint has already been uploaded.
+
+        Used to deduplicate flights recorded by multiple G3X display units
+        on the same aircraft. Each unit produces a different file (different
+        name, slightly different data), but they share a fingerprint derived
+        from aircraft_ident, system_id, and the UTC start minute.
+
+        Args:
+            fingerprint: Value returned by FlightData.flight_fingerprint()
+
+        Returns:
+            True if a flight with this fingerprint was already uploaded
+        """
+        data = self._load()
+        for record in data.get('processed', {}).values():
+            if record.get('flight_fingerprint') == fingerprint:
+                # Match uploaded flights AND historical skips — both mean
+                # this physical flight should not be uploaded again.
+                if record.get('is_flight') or record.get('historical'):
+                    return True
+        return False
 
     def get_record(self, file_hash: str) -> Optional[Dict[str, Any]]:
         """
@@ -87,7 +111,8 @@ class ProcessedFilesDatabase:
         file_path: Path,
         aircraft_ident: str,
         is_flight: bool,
-        upload_results: Optional[Dict[str, Any]] = None
+        upload_results: Optional[Dict[str, Any]] = None,
+        flight_fingerprint: Optional[str] = None
     ):
         """
         Mark a file as processed.
@@ -98,13 +123,14 @@ class ProcessedFilesDatabase:
             aircraft_ident: Aircraft identifier
             is_flight: Whether this was detected as a flight
             upload_results: Optional dict of upload results
+            flight_fingerprint: Optional fingerprint from FlightData.flight_fingerprint()
         """
         data = self._load()
 
         if 'processed' not in data:
             data['processed'] = {}
 
-        data['processed'][file_hash] = {
+        record = {
             'filename': file_path.name,
             'file_path': str(file_path),
             'aircraft': aircraft_ident,
@@ -112,9 +138,48 @@ class ProcessedFilesDatabase:
             'processed_at': datetime.now().isoformat(),
             'uploads': upload_results or {}
         }
+        if flight_fingerprint:
+            record['flight_fingerprint'] = flight_fingerprint
+
+        data['processed'][file_hash] = record
 
         self._save(data)
         logger.info(f"Marked file as processed: {file_path.name} ({file_hash[:8]}...)")
+
+    def mark_historical(self, file_hash: str, file_path: Path, flight_fingerprint: Optional[str] = None):
+        """
+        Mark a file as historical — it existed before the first run and
+        was intentionally skipped rather than uploaded.
+
+        Storing the flight_fingerprint is important for multi-display setups:
+        if card A is inserted first and its files are marked historical, cards B
+        and C (which have different hashes but the same fingerprint) will still
+        be caught as duplicates when they are inserted later.
+
+        Args:
+            file_hash: SHA256 hash of the file
+            file_path: Path to the file
+            flight_fingerprint: Optional fingerprint from FlightData.flight_fingerprint()
+        """
+        data = self._load()
+
+        if 'processed' not in data:
+            data['processed'] = {}
+
+        record = {
+            'filename': Path(file_path).name,
+            'file_path': str(file_path),
+            'aircraft': None,
+            'is_flight': False,
+            'historical': True,
+            'processed_at': datetime.now().isoformat(),
+            'uploads': {}
+        }
+        if flight_fingerprint:
+            record['flight_fingerprint'] = flight_fingerprint
+
+        data['processed'][file_hash] = record
+        self._save(data)
 
     def get_statistics(self) -> Dict[str, Any]:
         """
@@ -127,8 +192,9 @@ class ProcessedFilesDatabase:
         processed = data.get('processed', {})
 
         total = len(processed)
+        historical = sum(1 for record in processed.values() if record.get('historical', False))
         flights = sum(1 for record in processed.values() if record.get('is_flight', False))
-        non_flights = total - flights
+        non_flights = total - flights - historical
 
         # Count uploads by service
         upload_counts = {}
@@ -145,6 +211,7 @@ class ProcessedFilesDatabase:
             'total_processed': total,
             'flights': flights,
             'non_flights': non_flights,
+            'historical': historical,
             'uploads_by_service': upload_counts
         }
 

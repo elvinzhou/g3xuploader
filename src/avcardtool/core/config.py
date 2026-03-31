@@ -94,6 +94,9 @@ class SystemConfig:
     log_file: str = field(default_factory=lambda: str(Path.home() / ".local" / "share" / "avcardtool" / "avcardtool.log"))
     log_level: str = "INFO"
     debug: bool = False
+    mark_historical_on_first_run: bool = False
+    auto_process_flights: bool = False
+    auto_update_navdata: bool = False
 
 
 class Config:
@@ -210,6 +213,9 @@ class Config:
             self.system.log_file = sys.get("log_file", self.system.log_file)
             self.system.log_level = sys.get("log_level", self.system.log_level)
             self.system.debug = sys.get("debug", self.system.debug)
+            self.system.mark_historical_on_first_run = sys.get("mark_historical_on_first_run", self.system.mark_historical_on_first_run)
+            self.system.auto_process_flights = sys.get("auto_process_flights", self.system.auto_process_flights)
+            self.system.auto_update_navdata = sys.get("auto_update_navdata", self.system.auto_update_navdata)
 
     def save(self, path: Optional[Path] = None) -> None:
         """
@@ -345,10 +351,6 @@ class Config:
 
         # Set some example uploader configs
         config.flight_data.uploaders = {
-            "mock": UploaderConfig(
-                enabled=True,
-                config={"description": "Logs payloads for debugging"}
-            ),
             "cloudahoy": UploaderConfig(
                 enabled=False,
                 config={"api_token": "your-oauth-token"}

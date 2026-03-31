@@ -56,6 +56,38 @@ class FlightData:
     file_path: Path
     file_hash: str
 
+    def flight_fingerprint(self) -> Optional[str]:
+        """
+        Return a stable identifier for the physical flight, independent of
+        which display unit recorded it.
+
+        Multiple G3X displays on the same aircraft record the same flight to
+        their own SD cards. Each file has a different name and slightly
+        different data (sensor noise, 1-2 second start offset), so file hashes
+        never match. But they share:
+          - aircraft_ident
+          - system_id  (the avionics bus ID, present in #airframe_info)
+          - the UTC date and start-minute of the first data row
+
+        Fingerprint format:  {aircraft_ident}_{system_id}_{UTC_date}_{UTC_HHMM}
+        Example:             N662EZ_60002CA61BD97_20260327_2228
+
+        Returns None if the required fields are not available.
+        """
+        aircraft = self.metadata.aircraft_ident
+        system_id = (
+            self.metadata.additional.get('system_id')
+            or self.metadata.serial_number
+        )
+        if not aircraft or not system_id or not self.data_points:
+            return None
+
+        # Use the first data point's UTC timestamp, truncated to the minute
+        first_ts = self.data_points[0].timestamp
+        utc_date = first_ts.strftime('%Y%m%d')
+        utc_hhmm = first_ts.strftime('%H%M')
+        return f"{aircraft}_{system_id}_{utc_date}_{utc_hhmm}"
+
     @property
     def duration_seconds(self) -> float:
         """Calculate flight duration in seconds."""

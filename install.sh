@@ -133,11 +133,11 @@ sudo -u "$REAL_USER" mkdir -p "$CONFIG_DIR"
 sudo -u "$REAL_USER" mkdir -p "$DATA_DIR"
 
 if [ ! -f "$CONFIG_FILE" ]; then
-    echo "Generating default configuration..."
-    sudo -u "$REAL_USER" "$SYMLINK" config generate "$CONFIG_FILE"
-    echo "Default config created: $CONFIG_FILE"
+    echo "Launching setup wizard..."
+    echo ""
+    sudo -u "$REAL_USER" "$SYMLINK" setup --config-path "$CONFIG_FILE" < /dev/tty
 else
-    echo "Config already exists: $CONFIG_FILE"
+    echo "Config already exists: $CONFIG_FILE (skipping setup wizard)"
     # Patch stale /var/log path from old installs
     if grep -q '"/var/log/' "$CONFIG_FILE" 2>/dev/null; then
         NEW_LOG_PATH="${DATA_DIR}/avcardtool.log"
@@ -163,48 +163,77 @@ done
 echo "Done"
 
 # ---------------------------------------------------------------------------
-# Step 5: udev rules + polkit  (requires root — stays system-level)
+# Read wizard choices from the saved config
 # ---------------------------------------------------------------------------
-echo "[5/6] Installing udev rules and polkit policy..."
+_cfg_bool() {
+    local KEY="$1"
+    local DEFAULT="$2"
+    python3 -c "
+import json, sys
+try:
+    d = json.load(open('${CONFIG_FILE}'))
+    v = d.get('system', {}).get('${KEY}')
+    print('yes' if v else 'no')
+except Exception:
+    print('${DEFAULT}')
+" 2>/dev/null || echo "$DEFAULT"
+}
 
-UDEV_RULE_PATH="/etc/udev/rules.d/99-avcardtool-sdcard.rules"
+ENABLE_FLIGHT_PROC=$(_cfg_bool "auto_process_flights" "no")
+ENABLE_NAVDATA=$(_cfg_bool "auto_update_navdata" "no")
 
-if [ -f "systemd/99-avcardtool-sdcard.rules" ]; then
-    cp systemd/99-avcardtool-sdcard.rules "$UDEV_RULE_PATH"
-else
-    echo "Downloading udev rules from GitHub..."
-    curl -sSL \
-        "https://raw.githubusercontent.com/elvinzhou/g3xuploader/v${INSTALL_VERSION}/systemd/99-avcardtool-sdcard.rules" \
-        -o "$UDEV_RULE_PATH"
-fi
-
-chmod 644 "$UDEV_RULE_PATH"
-
-# Remove legacy rules
-rm -f /etc/udev/rules.d/99-aviation-sdcard.rules
-rm -f /etc/udev/rules.d/99-g3x-sdcard.rules
-rm -f /etc/udev/rules.d/99-g3x-db-sdcard.rules
-
-udevadm control --reload-rules
-udevadm trigger
-
-# polkit rule: allow service user to mount/unmount via udisks2 without a TTY
-POLKIT_RULE_PATH="/etc/polkit-1/rules.d/99-avcardtool.rules"
-if [ -f "systemd/99-avcardtool.rules" ]; then
-    sed "s|AVCARDTOOL_USER|${REAL_USER}|g" \
-        systemd/99-avcardtool.rules > "$POLKIT_RULE_PATH"
-else
-    echo "Downloading polkit rules from GitHub..."
-    curl -sSL \
-        "https://raw.githubusercontent.com/elvinzhou/g3xuploader/v${INSTALL_VERSION}/systemd/99-avcardtool.rules" \
-        | sed "s|AVCARDTOOL_USER|${REAL_USER}|g" > "$POLKIT_RULE_PATH"
-fi
-chmod 644 "$POLKIT_RULE_PATH"
-
-echo "Done"
+echo "Features enabled by setup:"
+echo "  Flight log processing:      $ENABLE_FLIGHT_PROC"
+echo "  Navdata auto-update:        $ENABLE_NAVDATA"
+echo ""
 
 # ---------------------------------------------------------------------------
-# Step 6: systemd services  (requires root — stays system-level)
+# Step 5: udev rules + polkit  (only if at least one feature is active)
+# ---------------------------------------------------------------------------
+if [ "$ENABLE_FLIGHT_PROC" = "yes" ] || [ "$ENABLE_NAVDATA" = "yes" ]; then
+    echo "[5/6] Installing udev rules and polkit policy..."
+
+    UDEV_RULE_PATH="/etc/udev/rules.d/99-avcardtool-sdcard.rules"
+
+    if [ -f "systemd/99-avcardtool-sdcard.rules" ]; then
+        cp systemd/99-avcardtool-sdcard.rules "$UDEV_RULE_PATH"
+    else
+        echo "  Downloading udev rules from GitHub..."
+        curl -sSL \
+            "https://raw.githubusercontent.com/elvinzhou/g3xuploader/v${INSTALL_VERSION}/systemd/99-avcardtool-sdcard.rules" \
+            -o "$UDEV_RULE_PATH"
+    fi
+
+    chmod 644 "$UDEV_RULE_PATH"
+
+    # Remove legacy rules
+    rm -f /etc/udev/rules.d/99-aviation-sdcard.rules
+    rm -f /etc/udev/rules.d/99-g3x-sdcard.rules
+    rm -f /etc/udev/rules.d/99-g3x-db-sdcard.rules
+
+    udevadm control --reload-rules
+    udevadm trigger
+
+    # polkit rule: allow service user to mount/unmount via udisks2 without a TTY
+    POLKIT_RULE_PATH="/etc/polkit-1/rules.d/99-avcardtool.rules"
+    if [ -f "systemd/99-avcardtool.rules" ]; then
+        sed "s|AVCARDTOOL_USER|${REAL_USER}|g" \
+            systemd/99-avcardtool.rules > "$POLKIT_RULE_PATH"
+    else
+        echo "  Downloading polkit rules from GitHub..."
+        curl -sSL \
+            "https://raw.githubusercontent.com/elvinzhou/g3xuploader/v${INSTALL_VERSION}/systemd/99-avcardtool.rules" \
+            | sed "s|AVCARDTOOL_USER|${REAL_USER}|g" > "$POLKIT_RULE_PATH"
+    fi
+    chmod 644 "$POLKIT_RULE_PATH"
+
+    echo "Done"
+else
+    echo "[5/6] Skipping udev rules (no automated features enabled)"
+fi
+
+# ---------------------------------------------------------------------------
+# Step 6: systemd services  (only install services for enabled features)
 # ---------------------------------------------------------------------------
 echo "[6/6] Installing systemd services..."
 
@@ -234,8 +263,21 @@ install_service() {
     echo "  Installed ${DEST}"
 }
 
-install_service "avcardtool-processor@.service"
-install_service "avcardtool-navdata@.service"
+INSTALLED_SERVICES=0
+
+if [ "$ENABLE_FLIGHT_PROC" = "yes" ]; then
+    install_service "avcardtool-processor@.service"
+    INSTALLED_SERVICES=$((INSTALLED_SERVICES + 1))
+else
+    rm -f /lib/systemd/system/avcardtool-processor@.service
+fi
+
+if [ "$ENABLE_NAVDATA" = "yes" ]; then
+    install_service "avcardtool-navdata@.service"
+    INSTALLED_SERVICES=$((INSTALLED_SERVICES + 1))
+else
+    rm -f /lib/systemd/system/avcardtool-navdata@.service
+fi
 
 # Remove legacy services
 systemctl disable aviation-processor@.service 2>/dev/null || true
@@ -246,6 +288,9 @@ rm -f /lib/systemd/system/g3x-db-updater@.service
 
 systemctl daemon-reload
 
+if [ "$INSTALLED_SERVICES" -eq 0 ]; then
+    echo "  No services installed (no automated features enabled)"
+fi
 echo "Done"
 
 # ---------------------------------------------------------------------------
@@ -261,14 +306,16 @@ echo "Data/logs:     $DATA_DIR"
 echo "Command:       avcardtool"
 echo ""
 echo "Next steps:"
-echo "  1. Edit $CONFIG_FILE with your settings"
-echo "  2. Configure upload service credentials"
-echo "  3. Insert an SD card to test automatic processing"
+echo "  1. Insert your SD card — processing starts automatically"
+echo "  2. Monitor progress:"
+echo "     journalctl -u 'avcardtool-*@*' -f"
+echo ""
+echo "To re-run setup or change credentials:"
+echo "  avcardtool setup"
 echo ""
 echo "Useful commands:"
 echo "  avcardtool --help"
 echo "  avcardtool config show"
 echo "  avcardtool self-update"
-echo "  journalctl -u avcardtool-processor@* -f"
 echo ""
 echo "======================================================================"
