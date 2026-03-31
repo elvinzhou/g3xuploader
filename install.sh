@@ -12,7 +12,7 @@
 
 set -e
 
-INSTALL_VERSION="1.4.9"
+INSTALL_VERSION="1.5.0"
 VENV_DIR="/opt/avcardtool/venv"
 SYMLINK="/usr/local/bin/avcardtool"
 
