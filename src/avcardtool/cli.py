@@ -1464,9 +1464,9 @@ def navdata_install(ctx, sd_card: Optional[Path], from_dir: Optional[Path], yes:
     # so Step 3 can look up the correct security_id per extracted file.
     _extracted_security_ids: dict[str, int] = {}
 
-    # Determine which avionics unit this card belongs to.
-    # Required when a subscription covers multiple avionics (e.g. G3X Touch + GTN 6XX)
-    # so we only extract TAW files for the correct unit.
+    # Determine which avionics unit this card belongs to, for logging and
+    # feat_unlk.dat identification. Files are installed as-is — the Garmin
+    # entitlements API already serves the correct files for each device.
     click.echo("\nResolving target avionics type...")
     target_db_type: Optional[int] = _resolve_target_db_type(sd_card, manifest)
     if target_db_type is None:
@@ -1501,16 +1501,6 @@ def navdata_install(ctx, sd_card: Optional[Path], from_dir: Optional[Path], yes:
             continue
 
         suffix = local_path.suffix.lower()
-
-        # Skip TAW files intended for a different avionics unit.
-        if suffix == ".taw" and target_db_type is not None:
-            entry_db_type = entry.get("taw_database_type")
-            if entry_db_type is not None and entry_db_type != target_db_type:
-                click.echo(
-                    f"  Skipping {local_path.name} "
-                    f"(db_type=0x{entry_db_type:04X}, not for this avionics)"
-                )
-                continue
 
         if suffix == ".taw":
             # Extract TAW archive — files go to paths determined by region headers.
