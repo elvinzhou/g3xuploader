@@ -1906,6 +1906,7 @@ def navdata_auto_update(ctx, device: Optional[Path]):
     # ---------------------------------------------------------------
     detector = SDCardDetector()
     _we_mounted: Optional[str] = None
+    _we_remounted: list = []  # cards we remounted rw that should be unmounted when done
 
     if device:
         from avcardtool.core import resolve_device_mount_point, get_mount_point
@@ -1939,12 +1940,16 @@ def navdata_auto_update(ctx, device: Optional[Path]):
         # udisks2 sometimes auto-mounts FAT volumes read-only (e.g. dirty bit).
         # Ensure we have read-write access before attempting any writes.
         from avcardtool.core import resolve_device_mount_point
+        from avcardtool.core.utils import _is_mounted_readonly
+        was_readonly = _is_mounted_readonly(Path(card.device_path))
         try:
             mount = resolve_device_mount_point(Path(card.device_path), readonly=False)
         except RuntimeError as e:
             _log.error(f"  Could not get read-write mount for {card.device_path}: {e}")
             issues.append(("ERROR", f"Mount failed for {card.device_path}: {e}"))
             continue
+        if was_readonly:
+            _we_remounted.append(str(mount))
 
         _log.info(f"Processing card: {mount}  serial={card.volume_id}")
 
@@ -2244,6 +2249,13 @@ def navdata_auto_update(ctx, device: Optional[Path]):
             detector.unmount_card(_we_mounted)
         except Exception as e:
             _log.warning(f"Could not unmount {_we_mounted}: {e}")
+
+    for mount_point in _we_remounted:
+        try:
+            detector.unmount_card(mount_point)
+            _log.info(f"Unmounted {mount_point}")
+        except Exception as e:
+            _log.warning(f"Could not unmount {mount_point}: {e}")
 
 
 # ============================================================================
