@@ -12,7 +12,10 @@
       "Bash(curl:*)",
       "Bash(sort ls:*)",
       "Bash(python:*)",
-      "Bash(pip show:*)"
+      "Bash(pip show:*)",
+      "Bash(grep -r \"ea\\\\|EA\\\\|blog\\\\|Blog\\\\|BLOG\" /workspaces/g3xuploader --include=*.py --include=*.md --include=*.json --include=*.txt)",
+      "Bash(grep -r \"SERVICE_NAME\\\\|uploader\\\\|upload\" /workspaces/g3xuploader/src/avcardtool/flight_data/uploaders/*.py)",
+      "Bash(gh api:*)"
     ]
   }
 }

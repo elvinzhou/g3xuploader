@@ -264,7 +264,7 @@ def flight_upload(ctx, log_file: Path, service: tuple, dry_run: bool):
 
     Analyzes the flight data and uploads to configured services.
 
-    Services: cloudahoy, flysto, savvy_aviation, maintenance_tracker
+    Services: cloudahoy, flysto, savvy_aviation, eablog
     """
     from avcardtool.flight_data import PROCESSORS, FlightDataAnalyzer
     from avcardtool.flight_data.uploaders import UPLOADERS
@@ -2408,19 +2408,23 @@ def setup_wizard(ctx, config_path: Optional[Path]):
 
         click.echo("")
 
-        # Maintenance Tracker
-        click.echo("  Maintenance Tracker (custom webhook)")
-        if click.confirm("    Enable Maintenance Tracker?", default=False):
-            tracker_url = click.prompt("    Webhook URL")
-            tracker_key = click.prompt("    API key")
-            uploaders['maintenance_tracker'] = UploaderConfig(
-                enabled=True,
-                config={'enabled': True, 'url': tracker_url, 'api_key': tracker_key}
+        # EABlog
+        click.echo("  EABlog (flight time tracking)")
+        if click.confirm("    Enable EABlog?", default=False):
+            eablog_key = click.prompt("    API key (eal_...)")
+            eablog_logbooks = click.prompt(
+                "    Engine logbook UUID(s), comma-separated (leave blank to skip engine times)",
+                default=""
             )
-            click.echo("    ✓ Maintenance Tracker configured")
+            logbook_list = [u.strip() for u in eablog_logbooks.split(',') if u.strip()]
+            uploaders['eablog'] = UploaderConfig(
+                enabled=True,
+                config={'enabled': True, 'api_key': eablog_key, 'engine_logbooks': logbook_list}
+            )
+            click.echo("    ✓ EABlog configured")
         else:
-            uploaders['maintenance_tracker'] = UploaderConfig(
-                enabled=False, config={'enabled': False, 'url': '', 'api_key': ''}
+            uploaders['eablog'] = UploaderConfig(
+                enabled=False, config={'enabled': False, 'api_key': '', 'engine_logbooks': []}
             )
 
         # --- First-run behavior ---

@@ -297,7 +297,7 @@ class Config:
             new_config["flight_data"]["flight_detection"] = data["flight_detection"]
 
         # Migrate uploaders
-        for uploader in ["savvy_aviation", "cloudahoy", "flysto", "maintenance_tracker"]:
+        for uploader in ["savvy_aviation", "cloudahoy", "flysto", "eablog"]:
             if uploader in data:
                 new_config["flight_data"]["uploaders"][uploader] = data[uploader]
 
@@ -370,11 +370,11 @@ class Config:
                     "password": "your-password"
                 }
             ),
-            "maintenance_tracker": UploaderConfig(
+            "eablog": UploaderConfig(
                 enabled=False,
                 config={
-                    "url": "https://your-tracker.com/api/flights",
-                    "api_key": "your-api-key"
+                    "api_key": "eal_your-api-key",
+                    "engine_logbooks": []
                 }
             )
         }
