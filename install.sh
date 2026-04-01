@@ -45,6 +45,27 @@ CONFIG_DIR="$REAL_HOME/.config/avcardtool"
 DATA_DIR="$REAL_HOME/.local/share/avcardtool"
 CONFIG_FILE="$CONFIG_DIR/config.json"
 
+# Snapshot first-run state before anything modifies the data directory.
+# processed_files.json is created by auto-process on first SD card use;
+# if it doesn't exist yet this is a genuine first run and we should trigger
+# udev at the end (after setup is complete) so any card already in the reader
+# gets processed with the correct config and historical-marking in place.
+DB_FILE="$DATA_DIR/processed_files.json"
+if [ -f "$DB_FILE" ]; then
+    IS_FIRST_RUN="no"
+else
+    IS_FIRST_RUN="yes"
+fi
+
+# ---------------------------------------------------------------------------
+# Stop any running avcardtool services before touching anything.
+# Without this, an SD card already in the reader can trigger auto-process
+# via the existing udev rule while the setup wizard is running, creating
+# processed_files.json before first-run historical marking can take effect.
+# ---------------------------------------------------------------------------
+systemctl stop 'avcardtool-processor@*' 2>/dev/null || true
+systemctl stop 'avcardtool-navdata@*' 2>/dev/null || true
+
 # ---------------------------------------------------------------------------
 # Detect existing installation and confirm upgrade
 # ---------------------------------------------------------------------------
@@ -212,7 +233,10 @@ if [ "$ENABLE_FLIGHT_PROC" = "yes" ] || [ "$ENABLE_NAVDATA" = "yes" ]; then
     rm -f /etc/udev/rules.d/99-g3x-db-sdcard.rules
 
     udevadm control --reload-rules
-    udevadm trigger
+    # Do NOT trigger -- re-triggering udev events for already-connected block
+    # devices would immediately fire auto-process on any SD card already in the
+    # reader, racing with first-run historical marking. New insertions will
+    # pick up the updated rules automatically.
 
     # polkit rule: allow service user to mount/unmount via udisks2 without a TTY
     POLKIT_RULE_PATH="/etc/polkit-1/rules.d/99-avcardtool.rules"
@@ -319,3 +343,14 @@ echo "  avcardtool config show"
 echo "  avcardtool self-update"
 echo ""
 echo "======================================================================"
+
+# ---------------------------------------------------------------------------
+# If this was a first run and automated features are enabled, trigger udev
+# now that setup is complete. Any SD card already in the reader will be
+# processed with the correct config and historical-marking logic in place.
+# ---------------------------------------------------------------------------
+if [ "$IS_FIRST_RUN" = "yes" ] && { [ "$ENABLE_FLIGHT_PROC" = "yes" ] || [ "$ENABLE_NAVDATA" = "yes" ]; }; then
+    echo ""
+    echo "First-run detected — triggering udev for any SD card already inserted..."
+    udevadm trigger --subsystem-match=block
+fi
