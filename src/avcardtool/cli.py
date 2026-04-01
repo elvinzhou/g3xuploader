@@ -1936,7 +1936,16 @@ def navdata_auto_update(ctx, device: Optional[Path]):
             _log.info(f"Skipping {card.device_path}: not mounted")
             continue
 
-        mount = Path(card.mount_point)
+        # udisks2 sometimes auto-mounts FAT volumes read-only (e.g. dirty bit).
+        # Ensure we have read-write access before attempting any writes.
+        from avcardtool.core import resolve_device_mount_point
+        try:
+            mount = resolve_device_mount_point(Path(card.device_path), readonly=False)
+        except RuntimeError as e:
+            _log.error(f"  Could not get read-write mount for {card.device_path}: {e}")
+            issues.append(("ERROR", f"Mount failed for {card.device_path}: {e}"))
+            continue
+
         _log.info(f"Processing card: {mount}  serial={card.volume_id}")
 
         # --- Resolve avionics type ---
