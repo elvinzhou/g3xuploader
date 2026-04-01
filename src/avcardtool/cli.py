@@ -793,9 +793,15 @@ def navdata_list_databases(ctx):
                         continue
                     for s in avdb.series:
                         installable = s.installable_issues
-                        latest = installable[0] if installable else (s.available_issues[0] if s.available_issues else None)
                         installed = f"  installed={avdb.installed_issue_name}" if avdb.installed_issue_name else ""
-                        can_install = f"  → can install: {latest.name} ({latest.effective_at[:10]}–{(latest.invalid_at or 'no expiry')[:10]})" if latest else "  (no installable issues)"
+                        if installable:
+                            latest = installable[0]
+                            can_install = f"  → can install: {latest.name} ({latest.effective_at[:10]}–{(latest.invalid_at or 'no expiry')[:10]})"
+                        elif s.issues_remaining == 0:
+                            expiry = s.expected_end_date[:10] if s.expected_end_date else "unknown"
+                            can_install = f"  [subscription expired {expiry}]"
+                        else:
+                            can_install = "  (no installable issues)"
                         click.echo(f"       {avdb.name} [{avdb.status}]  series={s.series_id}  {s.region_name}{installed}{can_install}")
 
     except GarminAPIError as e:
@@ -1983,11 +1989,23 @@ def navdata_auto_update(ctx, device: Optional[Path]):
         # current: latest installable, if different from what is on the card.
         # next:    first issue in available_issues that is not yet installable
         #          (upcoming cycle, pre-download).
+        #
+        # Entitlement check: skip a series entirely when installable_issues is
+        # empty AND issues_remaining is 0.  The aircraft API returns avdb_types
+        # for every database the device *supports*, not just ones the account is
+        # subscribed to.  Without this guard we would attempt to download and
+        # unlock databases the user has never purchased (e.g. Basemap on a GTN),
+        # resulting in 403 unlock errors and wasted downloads.
         plan = []  # [(avdb, series, issue)]
         for avdb in target_dev.avdb_types:
             installed_issue = installed_cycles.get(avdb.name, {}).get("issue")
             for s in avdb.series:
                 installable_names = {i.name for i in s.installable_issues}
+
+                # No installable issues and no remaining subscription credits
+                # means the user is not entitled to this database — skip it.
+                if not s.installable_issues and s.issues_remaining == 0:
+                    continue
 
                 if s.installable_issues:
                     current = s.installable_issues[0]
@@ -2043,8 +2061,12 @@ def navdata_auto_update(ctx, device: Optional[Path]):
         import time as _time
 
         for avdb, s, issue in plan:
-            cache_key = f"{avdb.name}/{issue.name}"
-            issue_cache_dir = cache_dir / avdb.name.replace(" ", "_") / issue.name
+            # Include series_id in the cache key so that different avionics
+            # families that share the same avdb name and cycle (e.g. GTN series
+            # 2230 vs G3X series 2239 both named "Navigation Data/2603") get
+            # separate cache slots and don't serve each other's TAW files.
+            cache_key = f"{s.series_id}/{issue.name}"
+            issue_cache_dir = cache_dir / str(s.series_id) / issue.name
 
             # --- Acquire download slot ---
             slot = _acquire_dl_slot(cache_dir, cache_key)
