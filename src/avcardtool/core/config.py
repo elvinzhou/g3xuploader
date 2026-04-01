@@ -297,7 +297,7 @@ class Config:
             new_config["flight_data"]["flight_detection"] = data["flight_detection"]
 
         # Migrate uploaders
-        for uploader in ["savvy_aviation", "cloudahoy", "flysto", "eablog"]:
+        for uploader in ["savvy_aviation", "cloudahoy", "flysto", "carryd"]:
             if uploader in data:
                 new_config["flight_data"]["uploaders"][uploader] = data[uploader]
 
@@ -370,7 +370,7 @@ class Config:
                     "password": "your-password"
                 }
             ),
-            "eablog": UploaderConfig(
+            "carryd": UploaderConfig(
                 enabled=False,
                 config={
                     "api_key": "eal_your-api-key",

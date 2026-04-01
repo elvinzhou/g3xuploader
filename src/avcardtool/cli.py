@@ -264,7 +264,7 @@ def flight_upload(ctx, log_file: Path, service: tuple, dry_run: bool):
 
     Analyzes the flight data and uploads to configured services.
 
-    Services: cloudahoy, flysto, savvy_aviation, eablog
+    Services: cloudahoy, flysto, savvy_aviation, carryd
     """
     from avcardtool.flight_data import PROCESSORS, FlightDataAnalyzer
     from avcardtool.flight_data.uploaders import UPLOADERS
@@ -2408,22 +2408,22 @@ def setup_wizard(ctx, config_path: Optional[Path]):
 
         click.echo("")
 
-        # EABlog
-        click.echo("  EABlog (flight time tracking)")
-        if click.confirm("    Enable EABlog?", default=False):
-            eablog_key = click.prompt("    API key (eal_...)")
-            eablog_logbooks = click.prompt(
+        # Carryd
+        click.echo("  Carryd (flight time tracking)")
+        if click.confirm("    Enable Carryd?", default=False):
+            carryd_key = click.prompt("    API key (eal_...)")
+            carryd_logbooks = click.prompt(
                 "    Engine logbook UUID(s), comma-separated (leave blank to skip engine times)",
                 default=""
             )
-            logbook_list = [u.strip() for u in eablog_logbooks.split(',') if u.strip()]
-            uploaders['eablog'] = UploaderConfig(
+            logbook_list = [u.strip() for u in carryd_logbooks.split(',') if u.strip()]
+            uploaders['carryd'] = UploaderConfig(
                 enabled=True,
-                config={'enabled': True, 'api_key': eablog_key, 'engine_logbooks': logbook_list}
+                config={'enabled': True, 'api_key': carryd_key, 'engine_logbooks': logbook_list}
             )
-            click.echo("    ✓ EABlog configured")
+            click.echo("    ✓ Carryd configured")
         else:
-            uploaders['eablog'] = UploaderConfig(
+            uploaders['carryd'] = UploaderConfig(
                 enabled=False, config={'enabled': False, 'api_key': '', 'engine_logbooks': []}
             )
 

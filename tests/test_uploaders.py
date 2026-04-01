@@ -15,7 +15,7 @@ from avcardtool.flight_data.uploaders import (
     CloudAhoyUploader,
     FlyStoUploader,
     SavvyAviationUploader,
-    EABlogUploader
+    CarrydUploader
 )
 from avcardtool.core.config import FlightDataConfig
 
@@ -246,17 +246,17 @@ class TestSavvyAviationUploader:
         assert staged_file.exists()
 
 
-class TestEABlogUploader:
-    """Tests for EABlog uploader."""
+class TestCarrydUploader:
+    """Tests for Carryd uploader."""
 
     def test_uploader_creation(self):
-        """Test creating an EABlog uploader."""
+        """Test creating an Carryd uploader."""
         config = {
             'enabled': True,
             'api_key': 'eal_test_key',
             'engine_logbooks': ['uuid-engine-1']
         }
-        uploader = EABlogUploader(config)
+        uploader = CarrydUploader(config)
         assert uploader.enabled is True
         assert uploader.api_key == 'eal_test_key'
         assert uploader.engine_logbooks == ['uuid-engine-1']
@@ -264,7 +264,7 @@ class TestEABlogUploader:
     def test_authentication_no_credentials(self):
         """Test authentication fails without API key."""
         config = {'enabled': True}
-        uploader = EABlogUploader(config)
+        uploader = CarrydUploader(config)
         assert uploader.authenticate() is False
 
     def test_authentication_with_credentials(self):
@@ -273,13 +273,13 @@ class TestEABlogUploader:
             'enabled': True,
             'api_key': 'eal_test_key',
         }
-        uploader = EABlogUploader(config)
+        uploader = CarrydUploader(config)
         assert uploader.authenticate() is True
 
     def test_upload_disabled(self, sample_flight_data):
         """Test upload when uploader is disabled."""
         config = {'enabled': False}
-        uploader = EABlogUploader(config)
+        uploader = CarrydUploader(config)
         result = uploader.upload_flight(sample_flight_data)
         assert result.success is False
         assert "not enabled" in result.message
@@ -290,14 +290,14 @@ class TestEABlogUploader:
             'enabled': True,
             'api_key': 'eal_test_key',
         }
-        uploader = EABlogUploader(config)
+        uploader = CarrydUploader(config)
         result = uploader.upload_flight(sample_flight_data, None)
         assert result.success is False
         assert "No analysis results" in result.message
 
-    @patch('avcardtool.flight_data.uploaders.eablog.requests.post')
+    @patch('avcardtool.flight_data.uploaders.carryd.requests.post')
     def test_upload_success(self, mock_post, sample_flight_data, sample_analysis_summary):
-        """Test successful upload to EABlog."""
+        """Test successful upload to Carryd."""
         mock_response = Mock()
         mock_response.status_code = 200
         mock_response.json.return_value = {
@@ -311,21 +311,21 @@ class TestEABlogUploader:
             'api_key': 'eal_test_key',
             'engine_logbooks': ['uuid-engine-1']
         }
-        uploader = EABlogUploader(config)
+        uploader = CarrydUploader(config)
         result = uploader.upload_flight(sample_flight_data, sample_analysis_summary)
 
         assert result.success is True
-        assert result.service == "EABlog"
+        assert result.service == "Carryd"
 
-        # Verify API call hits the correct EABlog endpoint
+        # Verify API call hits the correct Carryd endpoint
         assert mock_post.called
         call_args = mock_post.call_args
-        assert call_args[0][0] == 'https://eablog.elvinzhou.workers.dev/api/v1/flight-times'
+        assert call_args[0][0] == 'https://carryd.app/api/v1/flight-times'
         call_kwargs = call_args[1]
         assert call_kwargs['headers']['Authorization'] == 'Bearer eal_test_key'
         assert call_kwargs['headers']['Content-Type'] == 'application/json'
 
-        # Verify payload shape matches EABlog API
+        # Verify payload shape matches Carryd API
         payload = call_kwargs['json']
         assert 'registration' in payload
         assert 'totalTime' in payload
@@ -343,7 +343,7 @@ class TestUploaderIntegration:
         assert 'cloudahoy' in UPLOADERS
         assert 'flysto' in UPLOADERS
         assert 'savvy_aviation' in UPLOADERS
-        assert 'eablog' in UPLOADERS
+        assert 'carryd' in UPLOADERS
 
     def test_uploader_registry(self):
         """Test uploader registry structure."""

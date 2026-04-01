@@ -1,7 +1,7 @@
 """
-EABlog flight data uploader.
+Carryd flight data uploader.
 
-Pushes flight time data (Hobbs and engine tach) to the EABlog maintenance
+Pushes flight time data (Hobbs and engine tach) to the Carryd maintenance
 tracking platform via its public API.
 """
 
@@ -15,25 +15,25 @@ from avcardtool.flight_data.base import FlightData, FlightDataUploader, UploadRe
 
 logger = logging.getLogger(__name__)
 
-EABLOG_BASE_URL = "https://eablog.elvinzhou.workers.dev"
+CARRYD_BASE_URL = "https://carryd.app"
 
 
-class EABlogUploader(FlightDataUploader):
+class CarrydUploader(FlightDataUploader):
     """
-    Upload flight time data to EABlog.
+    Upload flight time data to Carryd.
 
-    Sends Hobbs (total airframe time) and engine tach times to the EABlog
+    Sends Hobbs (total airframe time) and engine tach times to the Carryd
     API after each flight. Engine logbook UUIDs must be configured in advance
-    (find them under Logbook → Settings in the EABlog dashboard).
+    (find them under Logbook → Settings in the Carryd dashboard).
 
     Configuration:
         enabled: bool - Enable/disable this uploader
-        api_key: str - EABlog API key (format: eal_...)
+        api_key: str - Carryd API key (format: eal_...)
         engine_logbooks: list[str] - Ordered list of engine logbook UUIDs.
             Index 0 is the primary engine. Omit to update only total time.
     """
 
-    SERVICE_NAME = "EABlog"
+    SERVICE_NAME = "Carryd"
 
     def __init__(self, config: dict):
         super().__init__(config)
@@ -42,7 +42,7 @@ class EABlogUploader(FlightDataUploader):
 
     def authenticate(self) -> bool:
         if not self.api_key:
-            logger.error("EABlog API key not configured")
+            logger.error("Carryd API key not configured")
             return False
         return True
 
@@ -52,7 +52,7 @@ class EABlogUploader(FlightDataUploader):
         analysis_results: Optional[dict] = None
     ) -> UploadResult:
         """
-        Upload flight time to EABlog.
+        Upload flight time to Carryd.
 
         Maps Hobbs ending hours to totalTime and tach ending hours to
         engineTimes using the configured logbook UUIDs.
@@ -68,7 +68,7 @@ class EABlogUploader(FlightDataUploader):
             return UploadResult(
                 success=False,
                 service=self.SERVICE_NAME,
-                message="EABlog upload not enabled"
+                message="Carryd upload not enabled"
             )
 
         if not analysis_results:
@@ -116,20 +116,20 @@ class EABlogUploader(FlightDataUploader):
         }
 
         if self.debug:
-            debug_filename = f"eablog_{Path(flight_data.file_path).stem}.json"
+            debug_filename = f"carryd_{Path(flight_data.file_path).stem}.json"
             self._save_debug_payload(debug_filename, json.dumps(payload, indent=2, default=str))
-            logger.info(f"[DEBUG] EABlog payload saved: {debug_filename}")
+            logger.info(f"[DEBUG] Carryd payload saved: {debug_filename}")
 
         if not self.api_key:
             return UploadResult(
                 success=False,
                 service=self.SERVICE_NAME,
-                message="EABlog API key not configured"
+                message="Carryd API key not configured"
             )
 
         try:
             response = requests.post(
-                f"{EABLOG_BASE_URL}/api/v1/flight-times",
+                f"{CARRYD_BASE_URL}/api/v1/flight-times",
                 headers={
                     "Authorization": f"Bearer {self.api_key}",
                     "Content-Type": "application/json",
@@ -147,7 +147,7 @@ class EABlogUploader(FlightDataUploader):
             if response.status_code == 200 and body.get('success'):
                 aircraft = body.get('aircraft', {})
                 logger.info(
-                    f"EABlog upload successful: {aircraft.get('registration')} "
+                    f"Carryd upload successful: {aircraft.get('registration')} "
                     f"total time {aircraft.get('totalTime')}"
                 )
                 return UploadResult(
@@ -159,7 +159,7 @@ class EABlogUploader(FlightDataUploader):
             else:
                 error = body.get('error') or response.text
                 error_msg = f"Upload failed: {response.status_code} - {error}"
-                logger.error(f"EABlog {error_msg}")
+                logger.error(f"Carryd {error_msg}")
                 return UploadResult(
                     success=False,
                     service=self.SERVICE_NAME,
@@ -168,7 +168,7 @@ class EABlogUploader(FlightDataUploader):
 
         except Exception as e:
             error_msg = f"Upload error: {str(e)}"
-            logger.error(f"EABlog {error_msg}")
+            logger.error(f"Carryd {error_msg}")
             return UploadResult(
                 success=False,
                 service=self.SERVICE_NAME,

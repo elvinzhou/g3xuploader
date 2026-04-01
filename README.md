@@ -75,7 +75,7 @@ You are asked whether to enable each service. Only enabled services will receive
 - **CloudAhoy** — API token (Bearer token from your CloudAhoy account)
 - **FlySto** — OAuth2 Client ID and Client Secret (from FlySto developer settings), redirect URI (default: `http://localhost:8080/callback`). The wizard prints the authorization URL and offers to complete the OAuth code exchange inline. You can skip this and authorize later with `avcardtool flight flysto-auth <code>`.
 - **Savvy Aviation** — No credentials required. Files are staged locally at `<data_dir>/savvy_staging/` for manual upload via their website.
-- **EABlog** — API key (format: `eal_...`, obtained from the EABlog dashboard under **Settings → API Keys**) and an optional comma-separated list of engine logbook UUIDs (found under **Logbook → Settings**). Omit logbook UUIDs to update total airframe time only.
+- **Carryd** — API key (format: `eal_...`, obtained from the Carryd dashboard under **Settings → API Keys**) and an optional comma-separated list of engine logbook UUIDs (found under **Logbook → Settings**). Omit logbook UUIDs to update total airframe time only.
 
 **First-run behavior** (only shown if flight processing is enabled):
 
