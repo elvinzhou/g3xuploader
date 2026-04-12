@@ -12,7 +12,7 @@
 
 set -e
 
-INSTALL_VERSION="1.7.0"
+INSTALL_VERSION="1.7.1"
 VENV_DIR="/opt/avcardtool/venv"
 SYMLINK="/usr/local/bin/avcardtool"
 
@@ -66,6 +66,8 @@ fi
 systemctl stop 'avcardtool-processor@*' 2>/dev/null || true
 systemctl stop 'avcardtool-navdata@*' 2>/dev/null || true
 systemctl stop 'avcardtool-navdata-watch@*' 2>/dev/null || true
+systemctl stop avcardtool-self-update.timer 2>/dev/null || true
+systemctl stop avcardtool-self-update.service 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
 # Detect existing installation and confirm upgrade
@@ -203,10 +205,12 @@ except Exception:
 
 ENABLE_FLIGHT_PROC=$(_cfg_bool "auto_process_flights" "no")
 ENABLE_NAVDATA=$(_cfg_bool "auto_update_navdata" "no")
+ENABLE_SELF_UPDATE=$(_cfg_bool "auto_self_update" "yes")
 
 echo "Features enabled by setup:"
 echo "  Flight log processing:      $ENABLE_FLIGHT_PROC"
 echo "  Navdata auto-update:        $ENABLE_NAVDATA"
+echo "  Self-update (weekly):       $ENABLE_SELF_UPDATE"
 echo ""
 
 # ---------------------------------------------------------------------------
@@ -304,6 +308,38 @@ if [ "$ENABLE_NAVDATA" = "yes" ]; then
 else
     rm -f /lib/systemd/system/avcardtool-navdata@.service
     rm -f /lib/systemd/system/avcardtool-navdata-watch@.service
+fi
+
+if [ "$ENABLE_SELF_UPDATE" = "yes" ]; then
+    install_service "avcardtool-self-update.service"
+    install_service "avcardtool-self-update.timer"
+    systemctl enable --now avcardtool-self-update.timer
+    echo "  Enabled avcardtool-self-update.timer (weekly)"
+
+    # Sudoers drop-in: lets the user run 'avcardtool self-update' without
+    # a password prompt, scoped to this one command only.
+    SUDOERS_SRC="systemd/avcardtool-sudoers"
+    SUDOERS_DEST="/etc/sudoers.d/avcardtool"
+    if [ ! -f "$SUDOERS_SRC" ]; then
+        SUDOERS_SRC=$(mktemp)
+        curl -sSL \
+            "https://raw.githubusercontent.com/elvinzhou/g3xuploader/v${INSTALL_VERSION}/systemd/avcardtool-sudoers" \
+            -o "$SUDOERS_SRC"
+    fi
+    sed "s|AVCARDTOOL_USER|${REAL_USER}|g" "$SUDOERS_SRC" > "${SUDOERS_DEST}.tmp"
+    chmod 0440 "${SUDOERS_DEST}.tmp"
+    if visudo -c -f "${SUDOERS_DEST}.tmp" >/dev/null 2>&1; then
+        mv "${SUDOERS_DEST}.tmp" "$SUDOERS_DEST"
+        echo "  Installed sudoers entry: passwordless self-update for ${REAL_USER}"
+    else
+        rm -f "${SUDOERS_DEST}.tmp"
+        echo "  Warning: sudoers validation failed — skipping passwordless self-update"
+    fi
+else
+    systemctl disable avcardtool-self-update.timer 2>/dev/null || true
+    rm -f /lib/systemd/system/avcardtool-self-update.service
+    rm -f /lib/systemd/system/avcardtool-self-update.timer
+    rm -f /etc/sudoers.d/avcardtool
 fi
 
 # Remove legacy services
