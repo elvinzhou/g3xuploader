@@ -1,0 +1,38 @@
+[Unit]
+Description=AVCardTool NavData Periodic Update Watch for %i
+Documentation=https://github.com/elvinzhou/g3xuploader
+# Stop when the card is removed
+BindsTo=dev-%i.device
+After=dev-%i.device
+# Start after the initial one-shot update finishes
+After=avcardtool-navdata@%i.service
+After=udisks2.service
+
+[Service]
+Type=simple
+# Sleep 24 hours then re-run; repeat for as long as the card stays inserted.
+# auto-update is idempotent — if the cycle hasn't changed it exits immediately.
+ExecStart=/bin/bash -c \
+  'while true; do \
+     sleep 86400; \
+     /usr/local/bin/avcardtool navdata auto-update /dev/%i; \
+   done'
+StandardOutput=journal
+StandardError=journal
+User=AVCARDTOOL_USER
+Group=AVCARDTOOL_USER
+
+# Security hardening (mirrors avcardtool-navdata@.service)
+PrivateTmp=yes
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=AVCARDTOOL_DATA_DIR AVCARDTOOL_CONFIG_DIR /media
+
+# Each wakeup can take a while (download + write); give it 30 min per cycle.
+# The service itself never "starts" in the readiness sense — it just loops.
+TimeoutStopSec=1800
+CPUQuota=50%
+MemoryMax=512M
+
+[Install]
+WantedBy=multi-user.target

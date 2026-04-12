@@ -65,6 +65,7 @@ fi
 # ---------------------------------------------------------------------------
 systemctl stop 'avcardtool-processor@*' 2>/dev/null || true
 systemctl stop 'avcardtool-navdata@*' 2>/dev/null || true
+systemctl stop 'avcardtool-navdata-watch@*' 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
 # Detect existing installation and confirm upgrade
@@ -298,9 +299,11 @@ fi
 
 if [ "$ENABLE_NAVDATA" = "yes" ]; then
     install_service "avcardtool-navdata@.service"
+    install_service "avcardtool-navdata-watch@.service"
     INSTALLED_SERVICES=$((INSTALLED_SERVICES + 1))
 else
     rm -f /lib/systemd/system/avcardtool-navdata@.service
+    rm -f /lib/systemd/system/avcardtool-navdata-watch@.service
 fi
 
 # Remove legacy services

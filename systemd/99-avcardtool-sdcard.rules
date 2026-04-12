@@ -1,15 +1,18 @@
 # udev rules for automatic aviation SD card processing
 #
-# When a FAT32-formatted SD card is inserted, two systemd services fire:
-#   avcardtool-processor@<dev>  — flight log analysis and upload
-#   avcardtool-navdata@<dev>    — navigation database auto-update
+# When a FAT32-formatted SD card is inserted, three systemd services fire:
+#   avcardtool-processor@<dev>       — flight log analysis and upload (one-shot)
+#   avcardtool-navdata@<dev>         — navigation database update on insert (one-shot)
+#   avcardtool-navdata-watch@<dev>   — periodic re-check every 24h while card stays inserted
 #
-# Both run as one-shot services and log to the systemd journal.
+# The watch service starts after the initial navdata update and loops until the
+# card is removed, ensuring long-inserted cards receive new AIRAC cycles automatically.
 #
 # Installation:
 #   sudo cp 99-avcardtool-sdcard.rules /etc/udev/rules.d/
-#   sudo cp avcardtool-processor@.service /etc/systemd/system/
-#   sudo cp avcardtool-navdata@.service   /etc/systemd/system/
+#   sudo cp avcardtool-processor@.service      /etc/systemd/system/
+#   sudo cp avcardtool-navdata@.service        /etc/systemd/system/
+#   sudo cp avcardtool-navdata-watch@.service  /etc/systemd/system/
 #   sudo udevadm control --reload-rules
 #   sudo systemctl daemon-reload
 #
@@ -22,7 +25,7 @@ ACTION=="add", \
   SUBSYSTEM=="block", \
   ENV{ID_FS_TYPE}=="vfat", \
   TAG+="systemd", \
-  ENV{SYSTEMD_WANTS}="avcardtool-processor@%k.service avcardtool-navdata@%k.service"
+  ENV{SYSTEMD_WANTS}="avcardtool-processor@%k.service avcardtool-navdata@%k.service avcardtool-navdata-watch@%k.service"
 
 # mmcblkXpY partitions (built-in SD card readers)
 ACTION=="add", \
@@ -30,4 +33,4 @@ ACTION=="add", \
   SUBSYSTEM=="block", \
   ENV{ID_FS_TYPE}=="vfat", \
   TAG+="systemd", \
-  ENV{SYSTEMD_WANTS}="avcardtool-processor@%k.service avcardtool-navdata@%k.service"
+  ENV{SYSTEMD_WANTS}="avcardtool-processor@%k.service avcardtool-navdata@%k.service avcardtool-navdata-watch@%k.service"
