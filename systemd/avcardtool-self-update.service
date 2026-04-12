@@ -1,0 +1,22 @@
+[Unit]
+Description=AVCardTool Self-Update
+Documentation=https://github.com/elvinzhou/g3xuploader
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# SUDO_USER tells _update_system_files which user's venv/config paths to use
+# when running as root without an actual sudo session.
+Environment=SUDO_USER=AVCARDTOOL_USER
+ExecStart=/usr/local/bin/avcardtool self-update
+StandardOutput=journal
+StandardError=journal
+User=root
+
+# Restart any running navdata watch services so they pick up the new binary.
+ExecStartPost=/bin/bash -c \
+  'systemctl restart "avcardtool-navdata-watch@*.service" 2>/dev/null || true'
+
+PrivateTmp=yes
+NoNewPrivileges=false

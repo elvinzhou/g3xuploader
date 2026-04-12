@@ -97,6 +97,7 @@ class SystemConfig:
     mark_historical_on_first_run: bool = False
     auto_process_flights: bool = False
     auto_update_navdata: bool = False
+    auto_self_update: bool = True
 
 
 class Config:
@@ -216,6 +217,7 @@ class Config:
             self.system.mark_historical_on_first_run = sys.get("mark_historical_on_first_run", self.system.mark_historical_on_first_run)
             self.system.auto_process_flights = sys.get("auto_process_flights", self.system.auto_process_flights)
             self.system.auto_update_navdata = sys.get("auto_update_navdata", self.system.auto_update_navdata)
+            self.system.auto_self_update = sys.get("auto_self_update", self.system.auto_self_update)
 
     def save(self, path: Optional[Path] = None) -> None:
         """

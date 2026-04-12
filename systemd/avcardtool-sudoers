@@ -1,0 +1,3 @@
+# Allow avcardtool user to run self-update without a password prompt.
+# Scoped to the exact binary so no other sudo access is granted.
+AVCARDTOOL_USER ALL=(root) NOPASSWD: /usr/local/bin/avcardtool self-update

@@ -2477,7 +2477,16 @@ def setup_wizard(ctx, config_path: Optional[Path]):
         mark_historical = False
 
     # ------------------------------------------------------------------
-    # Section 3: Navigation database auto-update
+    # Section 3: Self-update
+    # ------------------------------------------------------------------
+    click.echo("\n── Self-Update ───────────────────────────────────────────")
+
+    auto_self_update = click.confirm(
+        "Enable automatic weekly self-update?", default=True
+    )
+
+    # ------------------------------------------------------------------
+    # Section 4: Navigation database auto-update
     # ------------------------------------------------------------------
     click.echo("\n── Navigation Database Auto-Update ───────────────────────")
     click.echo(
@@ -2573,6 +2582,7 @@ def setup_wizard(ctx, config_path: Optional[Path]):
     cfg.system.mark_historical_on_first_run = mark_historical
     cfg.system.auto_process_flights = auto_process_flights
     cfg.system.auto_update_navdata = auto_update_navdata
+    cfg.system.auto_self_update = auto_self_update
 
     try:
         cfg.save(config_path)
@@ -2585,13 +2595,16 @@ def setup_wizard(ctx, config_path: Optional[Path]):
     click.echo("Setup complete!")
     click.echo("=" * 60)
 
-    if auto_process_flights or auto_update_navdata:
+    if auto_process_flights or auto_update_navdata or auto_self_update:
         click.echo("\nEnabled features:")
         if auto_process_flights:
             click.echo("  ✓ Flight log processing")
         if auto_update_navdata:
             click.echo("  ✓ Navigation database auto-update")
-        click.echo("\nInsert your SD card to trigger both.")
+        if auto_self_update:
+            click.echo("  ✓ Automatic weekly self-update")
+        if auto_process_flights or auto_update_navdata:
+            click.echo("\nInsert your SD card to trigger both.")
         click.echo("Monitor progress:")
         click.echo('  journalctl -u "avcardtool-*@*" -f')
     else:
@@ -2717,11 +2730,8 @@ def self_update(ctx, version: Optional[str]):
     """
     Update avcardtool to the latest version from GitHub.
 
-    Uses the same Python interpreter that is currently running so the correct
-    virtual environment or user installation is always targeted.
-
-    Run with sudo to also update udev rules and systemd service files:
-        sudo avcardtool self-update
+    Automatically re-runs with sudo if not already root, so that udev rules
+    and systemd service files are updated alongside the Python package.
 
     Examples:
         avcardtool self-update
@@ -2729,6 +2739,13 @@ def self_update(ctx, version: Optional[str]):
     """
     import re
     import subprocess
+
+    if os.geteuid() != 0:
+        args = ['sudo', sys.argv[0], 'self-update']
+        if version:
+            args += ['--version', version]
+        os.execvp('sudo', args)
+        # execvp replaces the current process; this line is unreachable
 
     repo = "git+https://github.com/elvinzhou/g3xuploader.git"
     package = f"{repo}@v{version}" if version else repo
@@ -2754,15 +2771,7 @@ def self_update(ctx, version: Optional[str]):
     else:
         click.echo("Update successful.")
 
-    # Update system files (udev rules + systemd services) if running as root
-    if os.geteuid() == 0:
-        _update_system_files(ctx, new_version)
-    else:
-        click.echo(
-            "\nNote: udev rules and systemd service files were not updated.\n"
-            "Run 'sudo avcardtool self-update' to update them as well."
-        )
-
+    _update_system_files(ctx, new_version)
     click.echo("Restart avcardtool service to apply.")
 
 
@@ -2812,6 +2821,28 @@ def _update_system_files(ctx: click.Context, version: Optional[str]) -> None:
             "substitute": True,
         },
         {
+            "url": f"{base_url}/systemd/avcardtool-navdata-watch@.service",
+            "dest": Path("/lib/systemd/system/avcardtool-navdata-watch@.service"),
+            "substitute": True,
+        },
+        {
+            "url": f"{base_url}/systemd/avcardtool-self-update.service",
+            "dest": Path("/lib/systemd/system/avcardtool-self-update.service"),
+            "substitute": True,
+        },
+        {
+            "url": f"{base_url}/systemd/avcardtool-self-update.timer",
+            "dest": Path("/lib/systemd/system/avcardtool-self-update.timer"),
+            "substitute": False,
+        },
+        {
+            "url": f"{base_url}/systemd/avcardtool-sudoers",
+            "dest": Path("/etc/sudoers.d/avcardtool"),
+            "substitute": True,
+            "mode": 0o440,
+            "validate": True,
+        },
+        {
             "url": f"{base_url}/systemd/99-avcardtool.rules",
             "dest": Path("/etc/polkit-1/rules.d/99-avcardtool.rules"),
             "substitute": True,
@@ -2823,6 +2854,11 @@ def _update_system_files(ctx: click.Context, version: Optional[str]) -> None:
 
     any_updated = False
     for entry in system_files:
+        # Skip sudoers entry if self-update is disabled
+        if entry.get("validate") and not (cfg.system.auto_self_update if cfg else True):
+            if entry["dest"].exists():
+                entry["dest"].unlink()
+            continue
         try:
             resp = _requests.get(entry["url"], timeout=30)
             resp.raise_for_status()
@@ -2836,8 +2872,20 @@ def _update_system_files(ctx: click.Context, version: Optional[str]) -> None:
                     .replace("AVCARDTOOL_CONFIG_DIR", config_dir)
                 )
 
-            entry["dest"].write_text(content)
-            entry["dest"].chmod(0o644)
+            if entry.get("validate"):
+                tmp = entry["dest"].with_suffix(".tmp")
+                tmp.write_text(content)
+                tmp.chmod(entry.get("mode", 0o644))
+                result = subprocess.run(["visudo", "-c", "-f", str(tmp)], capture_output=True)
+                if result.returncode != 0:
+                    tmp.unlink()
+                    click.echo(f"  Warning: sudoers validation failed — skipping {entry['dest'].name}", err=True)
+                    continue
+                tmp.rename(entry["dest"])
+            else:
+                entry["dest"].write_text(content)
+                entry["dest"].chmod(entry.get("mode", 0o644))
+
             click.echo(f"  Updated {entry['dest']}")
             any_updated = True
         except Exception as e:
@@ -2850,6 +2898,19 @@ def _update_system_files(ctx: click.Context, version: Optional[str]) -> None:
             click.echo("  Reloaded udev rules and systemd daemon.")
         except Exception as e:
             click.echo(f"  Warning: could not reload system: {e}", err=True)
+
+    # Enable or disable the self-update timer based on config
+    auto_self_update = cfg.system.auto_self_update if cfg else True
+    timer = "avcardtool-self-update.timer"
+    try:
+        if auto_self_update:
+            subprocess.run(["systemctl", "enable", "--now", timer], check=True, capture_output=True)
+            click.echo(f"  Enabled {timer}.")
+        else:
+            subprocess.run(["systemctl", "disable", "--now", timer], capture_output=True)
+            click.echo(f"  Disabled {timer} (auto_self_update=false in config).")
+    except Exception as e:
+        click.echo(f"  Warning: could not update {timer}: {e}", err=True)
 
 
 # ============================================================================

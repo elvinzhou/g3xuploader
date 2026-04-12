@@ -1,0 +1,14 @@
+[Unit]
+Description=AVCardTool Weekly Self-Update Timer
+Documentation=https://github.com/elvinzhou/g3xuploader
+
+[Timer]
+# Run once a week
+OnCalendar=weekly
+# Spread load — don't have every install hit GitHub at exactly midnight Sunday
+RandomizedDelaySec=3600
+# If the machine was off when the timer was due, run on next boot
+Persistent=true
+
+[Install]
+WantedBy=timers.target
