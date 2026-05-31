@@ -3401,8 +3401,24 @@ def self_update(ctx, version: Optional[str]):
     click.echo(f"Current version: v{__version__}")
     click.echo(f"Updating avcardtool to {target}...")
 
+    # Derive the install prefix from the binary's own location so pip always
+    # installs alongside the running binary regardless of whether we're called
+    # directly, via sudo, or by the systemd timer.
+    #
+    # e.g. /usr/local/bin/avcardtool  → prefix /usr/local
+    #      ~/.local/bin/avcardtool    → prefix ~/.local
+    #
+    # Without this, sudo changes HOME and sys.executable may point to the
+    # system Python while the package lives in the user's prefix — causing
+    # pip to install to the wrong site-packages directory.
+    binary = Path(sys.argv[0]).resolve()
+    prefix = binary.parent.parent  # bin/../ == prefix
+
+    pip_cmd = [sys.executable, '-m', 'pip', 'install', '--upgrade',
+               '--prefix', str(prefix), package]
+
     result = subprocess.run(
-        [sys.executable, '-m', 'pip', 'install', '--upgrade', package],
+        pip_cmd,
         capture_output=True,
         text=True
     )
