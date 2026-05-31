@@ -3398,10 +3398,27 @@ def self_update(ctx, version: Optional[str]):
     package = f"{repo}@v{version}" if version else repo
     target = f"v{version}" if version else "latest"
 
+    click.echo(f"Current version: v{__version__}")
     click.echo(f"Updating avcardtool to {target}...")
 
+    # Derive the install prefix from the binary's own location so pip always
+    # installs alongside the running binary regardless of whether we're called
+    # directly, via sudo, or by the systemd timer.
+    #
+    # e.g. /usr/local/bin/avcardtool  → prefix /usr/local
+    #      ~/.local/bin/avcardtool    → prefix ~/.local
+    #
+    # Without this, sudo changes HOME and sys.executable may point to the
+    # system Python while the package lives in the user's prefix — causing
+    # pip to install to the wrong site-packages directory.
+    binary = Path(sys.argv[0]).resolve()
+    prefix = binary.parent.parent  # bin/../ == prefix
+
+    pip_cmd = [sys.executable, '-m', 'pip', 'install', '--upgrade',
+               '--prefix', str(prefix), package]
+
     result = subprocess.run(
-        [sys.executable, '-m', 'pip', 'install', '--upgrade', package],
+        pip_cmd,
         capture_output=True,
         text=True
     )
@@ -3410,13 +3427,25 @@ def self_update(ctx, version: Optional[str]):
         click.echo(f"Update failed:\n{result.stderr.strip()}", err=True)
         sys.exit(1)
 
-    # Extract installed version from pip output, e.g. "Successfully installed avcardtool-1.3.2"
-    match = re.search(r'Successfully installed avcardtool-([\d.]+)', result.stdout)
-    new_version = match.group(1) if match else version
-    if new_version:
+    # pip prints "Successfully installed avcardtool-X.Y.Z" when something changed,
+    # or "Requirement already satisfied" when already at the latest version.
+    installed_match = re.search(r'Successfully installed avcardtool-([\d.]+)', result.stdout)
+    already_satisfied = 'already satisfied' in result.stdout.lower()
+
+    if installed_match:
+        new_version = installed_match.group(1)
         click.echo(f"Updated to v{new_version}.")
+    elif version:
+        # Pinned version install that pip didn't report as a new install
+        new_version = version
+        click.echo(f"Installed v{new_version}.")
     else:
-        click.echo("Update successful.")
+        new_version = None
+        if already_satisfied:
+            click.echo(f"Already up to date (v{__version__}).")
+            _update_system_files(ctx, None)
+            return
+        click.echo("Update complete.")
 
     _update_system_files(ctx, new_version)
     click.echo("Restart avcardtool service to apply.")
