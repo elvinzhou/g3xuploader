@@ -1793,6 +1793,9 @@ def navdata_install(ctx, sd_card: Optional[Path], from_dir: Optional[Path], yes:
             "gadmTailNumber": tail_number,
             "gadmFleetMetadata": existing_gadm.get("gadmFleetMetadata"),
         }
+        if gadm_meta_path.exists():
+            from avcardtool.navdata.garmin.taw_parser import _clear_readonly
+            _clear_readonly(gadm_meta_path)
         gadm_meta_path.write_text(json.dumps(gadm))
         click.echo("Updated .gadm.meta")
     except Exception as e:
@@ -2514,9 +2517,21 @@ def navdata_update(ctx, device: Optional[Path], aircraft: int, yes: bool):
             click.echo("No SD cards found. Insert a card or specify the device path.", err=True)
             sys.exit(1)
         garmin_first = sorted(candidates, key=lambda c: (0 if c.is_garmin else 1))
+        from avcardtool.core import resolve_device_mount_point, get_mount_point
+        from avcardtool.core.utils import _is_mounted_readonly
         for c in garmin_first:
+            dev_path = Path(c.device_path) if c.device_path else None
+            mount = Path(c.mount_point)
+            if dev_path and dev_path.is_block_device():
+                if _is_mounted_readonly(dev_path):
+                    click.echo(f"  {mount}: mounted read-only, remounting rw...")
+                try:
+                    mount = resolve_device_mount_point(dev_path, readonly=False)
+                except RuntimeError as e:
+                    click.echo(f"  Could not get rw mount for {dev_path}: {e}", err=True)
+                    continue
             raw_cards.append({
-                'mount': Path(c.mount_point),
+                'mount': mount,
                 'card_serial': c.volume_id or "0",
                 'device_path': c.device_path,
             })
@@ -2587,7 +2602,9 @@ def navdata_update(ctx, device: Optional[Path], aircraft: int, yes: bool):
                     if current.name != installed_issue:
                         plan.append((avdb, s, current, installed_issue, "update"))
                     else:
-                        current_ok.append((avdb.name, installed_issue))
+                        key = (avdb.name, installed_issue)
+                        if key not in {(n, i) for n, i in current_ok}:
+                            current_ok.append((avdb.name, installed_issue))
                 installable_names = {i.name for i in s.installable_issues}
                 for issue in s.available_issues:
                     if issue.name not in installable_names:
@@ -2743,6 +2760,7 @@ def navdata_update(ctx, device: Optional[Path], aircraft: int, yes: bool):
             click.echo(f"Warning: batch session failed ({e}) — using direct auth")
 
         manifest_entries = []
+        crc_confirmed: dict = {}  # avdb.name -> issue.name for CRC-matched items
 
         for avdb, s, issue, installed_issue, reason, files, removable, size in plan_details:
             dl_cache_key = f"{s.series_id}/{issue.name}"
@@ -2774,6 +2792,7 @@ def navdata_update(ctx, device: Optional[Path], aircraft: int, yes: bool):
                         and cached_crcs.get(feat_name)
                         and feat_unlk_crcs[feat_name] == cached_crcs[feat_name]):
                     click.echo("    Already installed (CRC match) — skipping.")
+                    crc_confirmed[avdb.name] = issue.name
                     continue
                 for file_entry in dl_state.get(dl_cache_key, {}).get("files", []):
                     src = cache_dir / file_entry["cache_path"]
@@ -2871,6 +2890,23 @@ def navdata_update(ctx, device: Optional[Path], aircraft: int, yes: bool):
 
         if not manifest_entries:
             click.echo(f"\n  Nothing new to install for {mount}.")
+            if crc_confirmed:
+                # The plan thought these were missing, but CRCs prove they're
+                # current. Record them so the next plan shows them as up to date.
+                try:
+                    cycles_file = mount / ".navdata_cycles.json"
+                    existing: dict = {}
+                    if cycles_file.exists():
+                        try:
+                            existing = json.loads(cycles_file.read_text()).get("cycles", {})
+                        except Exception:
+                            pass
+                    for db_name, issue_name in crc_confirmed.items():
+                        existing[db_name] = {"issue": issue_name}
+                    cycles_file.write_text(json.dumps({"cycles": existing}, indent=2))
+                    click.echo(f"  Updated .navdata_cycles.json with {len(crc_confirmed)} confirmed cycle(s).")
+                except Exception as e:
+                    click.echo(f"  Warning: could not update .navdata_cycles.json: {e}", err=True)
             continue
 
         system_ids = batch_system_ids or (
@@ -3394,34 +3430,44 @@ def self_update(ctx, version: Optional[str]):
         os.execvp('sudo', args)
         # execvp replaces the current process; this line is unreachable
 
+    click.echo(f"Current version: v{__version__}")
+
+    # Check whether this is a development (editable) install.  If so, skip
+    # the pip upgrade — the developer manages the code via git — but still
+    # refresh system files so udev rules and systemd units stay current.
+    pip_show = subprocess.run(
+        [sys.executable, '-m', 'pip', 'show', 'avcardtool'],
+        capture_output=True, text=True
+    )
+    dev_path = None
+    for line in pip_show.stdout.splitlines():
+        if line.lower().startswith('editable project location'):
+            dev_path = line.split(':', 1)[1].strip()
+            break
+
+    if dev_path:
+        click.echo(f"Development install ({dev_path}) — skipping pip upgrade.")
+        click.echo("Updating system files...")
+        _update_system_files(ctx, None)
+        return
+
     repo = "git+https://github.com/elvinzhou/g3xuploader.git"
     package = f"{repo}@v{version}" if version else repo
     target = f"v{version}" if version else "latest"
 
-    click.echo(f"Current version: v{__version__}")
     click.echo(f"Updating avcardtool to {target}...")
 
-    # Derive the install prefix from the binary's own location so pip always
-    # installs alongside the running binary regardless of whether we're called
-    # directly, via sudo, or by the systemd timer.
-    #
-    # e.g. /usr/local/bin/avcardtool  → prefix /usr/local
-    #      ~/.local/bin/avcardtool    → prefix ~/.local
-    #
-    # Without this, sudo changes HOME and sys.executable may point to the
-    # system Python while the package lives in the user's prefix — causing
-    # pip to install to the wrong site-packages directory.
-    binary = Path(sys.argv[0]).resolve()
-    prefix = binary.parent.parent  # bin/../ == prefix
-
-    pip_cmd = [sys.executable, '-m', 'pip', 'install', '--upgrade',
-               '--prefix', str(prefix), package]
-
-    result = subprocess.run(
-        pip_cmd,
-        capture_output=True,
-        text=True
-    )
+    # Run pip. On Debian/Raspberry Pi OS with Python 3.11+ (PEP 668), pip
+    # refuses to install into the system environment without the
+    # --break-system-packages flag. Try without it first; if pip rejects
+    # with the managed-environment error, retry with the flag.
+    pip_base = [sys.executable, '-m', 'pip', 'install', '--upgrade', package]
+    result = subprocess.run(pip_base, capture_output=True, text=True)
+    if result.returncode != 0 and 'externally-managed' in (result.stdout + result.stderr).lower():
+        result = subprocess.run(
+            pip_base + ['--break-system-packages'],
+            capture_output=True, text=True
+        )
 
     if result.returncode != 0:
         click.echo(f"Update failed:\n{result.stderr.strip()}", err=True)
