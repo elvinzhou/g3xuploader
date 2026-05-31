@@ -305,7 +305,11 @@ def write_feat_unlk_for_file(
     rel_str = str(rel).replace('\\', '/')
     feature = FILENAME_TO_FEATURE.get(rel_str)
     if feature is None:
-        logger.debug(f"feat_unlk: no feature for {rel_str}, skipping")
+        # Individual raster tiles (.jnx) never have unlock entries — only the
+        # manifest (rasters.xml / rasters.hif) does.  Suppress the per-tile
+        # message to avoid log spam; log anything else as before.
+        if not rel_str.lower().endswith('.jnx'):
+            logger.debug(f"feat_unlk: no feature for {rel_str}, skipping")
         return False
 
     try:
