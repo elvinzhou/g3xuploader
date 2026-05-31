@@ -558,9 +558,61 @@ def auto_process(ctx, path: Path, service: tuple, skip_uploads: bool):
         click.echo("\nDone. Only flights recorded after this point will be uploaded.")
         sys.exit(0)
 
-    upload_services = list(service) if service else []
+    # Sort files chronologically using the timestamp in Garmin filenames
+    # (log_YYYYMMDD_HHMMSS_...).  This ordering is required so that
+    # pending_uploads[-1] is always the most recently recorded flight.
+    import re as _re
 
-    # Process each file
+    def _log_date_key(p: Path) -> str:
+        m = _re.search(r'log_(\d{8}_\d{6})', p.name)
+        return m.group(1) if m else p.name
+
+    log_files.sort(key=_log_date_key)
+
+    # Determine upload services once (same for every file in this batch).
+    if service:
+        upload_services = list(service)
+    else:
+        upload_services = []
+        for service_name in cfg.flight_data.uploaders:
+            if cfg.flight_data.uploaders[service_name].enabled:
+                upload_services.append(service_name)
+
+    # Pre-scan the newest unprocessed file for a non-flight override.
+    #
+    # If the most recent recording is a ground power cycle (not a flight),
+    # the avionics recorded its internal Hobbs and engine hours in that
+    # file's #airframe_info header.  Those starting values are more
+    # authoritative than whatever our algorithm calculated as the ending
+    # hours of the previous flight, so we'll substitute them below.
+    override_meta: Optional[dict] = None
+    _unprocessed = [f for f in log_files if not processed_db.is_processed(hash_file(f))]
+    if _unprocessed:
+        _newest = _unprocessed[-1]
+        for _PC in PROCESSORS:
+            _p = _PC()
+            if _p.detect_log_format(_newest):
+                try:
+                    _nfd = _p.parse_log(_newest)
+                    _nan = FlightDataAnalyzer(cfg.flight_data).analyze(_nfd)
+                    if not _nan.detection.is_flight:
+                        override_meta = {
+                            'file': _newest.name,
+                            'file_date_key': _log_date_key(_newest),
+                            'airframe_hours': _nfd.metadata.airframe_hours_start,
+                            'engine_hours': _nfd.metadata.engine_hours_start,
+                            'aircraft_ident': _nfd.metadata.aircraft_ident,
+                            'date': _nfd.metadata.date,
+                        }
+                except Exception:
+                    pass
+                break
+
+    # Process each file — detect flights and collect pending uploads.
+    # Uploads are deferred until after the loop so the non-flight override
+    # can be applied to the most recently dated flight before any data is sent.
+    pending_uploads: list = []  # [(file_hash, log_file, flight_data, analysis, fingerprint)]
+
     stats = {
         'total': len(log_files),
         'already_processed': 0,
@@ -638,60 +690,142 @@ def auto_process(ctx, path: Path, service: tuple, skip_uploads: bool):
                 )
                 continue
 
-            # Upload to services
-            analysis_summary = analyzer.analyze_summary(flight_data)
-
-            # Determine which services to upload to
-            if service:
-                upload_services = list(service)
-            else:
-                upload_services = []
-                for service_name in cfg.flight_data.uploaders:
-                    if cfg.flight_data.uploaders[service_name].enabled:
-                        upload_services.append(service_name)
-
-            upload_results = {}
-            for service_name in upload_services:
-                if service_name not in UPLOADERS:
-                    continue
-
-                uploader_cfg = cfg.flight_data.uploaders.get(service_name)
-                if uploader_cfg is None:
-                    continue
-                uploader_config = dict(uploader_cfg.config)
-                uploader_config['enabled'] = uploader_cfg.enabled
-                uploader_config['data_dir'] = cfg.system.data_dir
-                uploader_config['debug'] = cfg.system.debug
-                UploaderClass = UPLOADERS[service_name]
-                uploader = UploaderClass(uploader_config)
-
-                result = uploader.upload_flight(flight_data, analysis_summary)
-                upload_results[service_name] = {
-                    'success': result.success,
-                    'message': result.message,
-                    'url': result.url
-                }
-
-                if result.success:
-                    click.echo(f"    ✓ {service_name}")
-                    stats['upload_success'] += 1
-                else:
-                    click.echo(f"    ✗ {service_name}: {result.message}")
-                    stats['upload_failed'] += 1
-
-            # Mark as processed
-            processed_db.mark_processed(
-                file_hash,
-                log_file,
-                analysis.aircraft_ident,
-                True,
-                upload_results,
-                flight_fingerprint=fingerprint
-            )
+            pending_uploads.append((file_hash, log_file, flight_data, analysis, fingerprint))
 
         except Exception as e:
             logger.exception(f"Error processing {log_file}")
             click.echo(f"  ✗ Error: {e}", err=True)
+
+    # Build analysis summaries and apply the non-flight override where applicable.
+    #
+    # The override targets only pending_uploads[-1] — the most recently dated
+    # flight — because the non-flight file immediately follows it.  The
+    # condition is: override file timestamp > flight file timestamp.
+    pending_with_summaries: list = []
+    for idx, (fh, lf, fd, an, fp) in enumerate(pending_uploads):
+        summary = FlightDataAnalyzer(cfg.flight_data).analyze_summary(fd)
+        is_most_recent = (idx == len(pending_uploads) - 1)
+
+        if is_most_recent and override_meta:
+            if _log_date_key(lf) < override_meta['file_date_key']:
+                new_hobbs = override_meta['airframe_hours']
+                old_hobbs = (summary.get('hobbs') or {}).get('ending_hours')
+                if new_hobbs is not None and new_hobbs != old_hobbs:
+                    summary = {**summary, 'hobbs': {**(summary.get('hobbs') or {}),
+                                                     'ending_hours': new_hobbs}}
+                    click.echo(
+                        f"\n  {lf.name}: Hobbs ending adjusted "
+                        f"{old_hobbs:.2f}h → {new_hobbs:.2f}h "
+                        f"(authoritative value from {override_meta['file']})"
+                    )
+
+                new_tach = override_meta['engine_hours']
+                old_tach = (summary.get('tach') or {}).get('ending_hours')
+                if new_tach is not None and new_tach != old_tach:
+                    summary = {**summary, 'tach': {**(summary.get('tach') or {}),
+                                                    'ending_hours': new_tach}}
+                    click.echo(
+                        f"  {lf.name}: Tach ending adjusted "
+                        f"{old_tach:.2f}h → {new_tach:.2f}h "
+                        f"(authoritative value from {override_meta['file']})"
+                    )
+
+        pending_with_summaries.append((fh, lf, fd, an, fp, summary))
+
+    # Upload all pending flights
+    for file_hash, log_file, flight_data, analysis, fingerprint, analysis_summary in pending_with_summaries:
+        upload_results = {}
+        for service_name in upload_services:
+            if service_name not in UPLOADERS:
+                continue
+
+            uploader_cfg = cfg.flight_data.uploaders.get(service_name)
+            if uploader_cfg is None:
+                continue
+            uploader_config = dict(uploader_cfg.config)
+            uploader_config['enabled'] = uploader_cfg.enabled
+            uploader_config['data_dir'] = cfg.system.data_dir
+            uploader_config['debug'] = cfg.system.debug
+            UploaderClass = UPLOADERS[service_name]
+            uploader = UploaderClass(uploader_config)
+
+            result = uploader.upload_flight(flight_data, analysis_summary)
+            upload_results[service_name] = {
+                'success': result.success,
+                'message': result.message,
+                'url': result.url
+            }
+
+            if result.success:
+                click.echo(f"    ✓ {service_name}")
+                stats['upload_success'] += 1
+            else:
+                click.echo(f"    ✗ {service_name}: {result.message}")
+                stats['upload_failed'] += 1
+
+        # Mark as processed
+        processed_db.mark_processed(
+            file_hash,
+            log_file,
+            analysis.aircraft_ident,
+            True,
+            upload_results,
+            flight_fingerprint=fingerprint
+        )
+
+    # When no flights were found but a non-flight file provided authoritative
+    # times, we can still keep Carryd in sync using those values directly.
+    # This requires the Carryd GET endpoint (get_current_times) so we can
+    # compare before pushing and avoid spurious updates.
+    #
+    # Uncomment the block below once GET /api/v1/aircraft is available.
+    #
+    # if override_meta and not pending_uploads and not skip_uploads \
+    #         and 'carryd' in upload_services:
+    #     uploader_cfg = cfg.flight_data.uploaders.get('carryd')
+    #     if uploader_cfg and uploader_cfg.enabled:
+    #         from avcardtool.flight_data.uploaders.carryd import CarrydUploader
+    #         uploader_config = dict(uploader_cfg.config)
+    #         uploader_config['enabled'] = uploader_cfg.enabled
+    #         uploader_config['data_dir'] = cfg.system.data_dir
+    #         uploader_config['debug'] = cfg.system.debug
+    #         carryd = CarrydUploader(uploader_config)
+    #
+    #         # Check what Carryd already has before pushing.
+    #         current = carryd.get_current_times(
+    #             registration=override_meta.get('aircraft_ident')
+    #         )
+    #         hobbs_changed = (
+    #             current is None
+    #             or current.get('totalTime') != override_meta['airframe_hours']
+    #         )
+    #         # Build engine_times dict if logbooks are configured.
+    #         engine_times = {}
+    #         if carryd.engine_logbooks and override_meta['engine_hours'] is not None:
+    #             engine_times[carryd.engine_logbooks[0]] = override_meta['engine_hours']
+    #         engines_changed = any(
+    #             (current or {}).get('engineTimes', {}).get(k) != v
+    #             for k, v in engine_times.items()
+    #         ) if current else bool(engine_times)
+    #
+    #         if hobbs_changed or engines_changed:
+    #             synthetic_summary = {
+    #                 'aircraft_ident': override_meta['aircraft_ident'],
+    #                 'date': override_meta['date'],
+    #                 'hobbs': {'ending_hours': override_meta['airframe_hours']},
+    #                 'tach': {'ending_hours': override_meta['engine_hours']},
+    #             }
+    #             # upload_flight expects a FlightData for debug file naming only;
+    #             # pass None — the debug branch is guarded by self.debug and
+    #             # would need a small None-check added to carryd.py if enabled.
+    #             result = carryd.upload_flight(None, synthetic_summary)
+    #             status = '✓' if result.success else '✗'
+    #             click.echo(
+    #                 f"\n  Carryd no-flight sync ({override_meta['file']}): "
+    #                 f"{status} {result.message}"
+    #             )
+    #         else:
+    #             click.echo(f"\n  Carryd already current — no sync needed")
 
     # Summary
     click.echo(f"\n{'='*60}")
@@ -2258,6 +2392,519 @@ def navdata_auto_update(ctx, device: Optional[Path]):
             _log.warning(f"Could not unmount {mount_point}: {e}")
 
 
+def _fmt_size(n: int) -> str:
+    if n >= 1_073_741_824:
+        return f"{n / 1_073_741_824:.1f} GB"
+    if n >= 1_048_576:
+        return f"{n / 1_048_576:.1f} MB"
+    if n >= 1_024:
+        return f"{n / 1_024:.1f} KB"
+    return f"{n} B"
+
+
+@navdata.command('update')
+@click.argument('device', type=click.Path(path_type=Path, readable=False), required=False)
+@click.option('--aircraft', '-a', type=int, default=0, show_default=True,
+              help='Aircraft index (from list-databases)')
+@click.option('--yes', '-y', is_flag=True, help='Skip confirmation prompt')
+@click.pass_context
+def navdata_update(ctx, device: Optional[Path], aircraft: int, yes: bool):
+    """
+    Interactively update navigation databases on SD card(s).
+
+    Shows a plan for each connected card — what is installed, what will be
+    downloaded, and file sizes — then asks for a single confirmation before
+    proceeding.
+
+    DEVICE can be a block device (e.g. /dev/sda1) or a mount point to target
+    a specific card.  If omitted, all detected SD cards are processed.
+    """
+    import datetime
+    import time as _time
+    from avcardtool.navdata.garmin.auth import GarminAuth, GarminAPIError
+    from avcardtool.navdata.garmin.api import FlyGarminAPI, BatchDatabase
+    from avcardtool.navdata.garmin.taw_parser import TAWParser
+    from avcardtool.navdata.sdcard import SDCardDetector
+
+    cfg = ctx.obj['config']
+    data_dir = Path(cfg.system.data_dir)
+
+    # --- Authenticate ---
+    auth = GarminAuth(token_dir=data_dir)
+    if not auth.ensure_authenticated():
+        msg = (
+            "Garmin access token expired. Run 'avcardtool navdata login' to re-authenticate."
+            if auth.tokens.access_token
+            else "Not authenticated. Run 'avcardtool navdata login' first."
+        )
+        click.echo(msg, err=True)
+        sys.exit(1)
+
+    api = FlyGarminAPI(auth)
+
+    # --- Fetch aircraft + device models (shared across all cards) ---
+    click.echo("Fetching aircraft and database information from flyGarmin...")
+    try:
+        aircraft_list = api.list_aircraft()
+    except GarminAPIError as e:
+        click.echo(f"API error: {e}", err=True)
+        sys.exit(1)
+    except Exception as e:
+        click.echo(f"Unexpected error: {e}", err=True)
+        sys.exit(1)
+
+    if not aircraft_list:
+        click.echo("No aircraft found on this account.", err=True)
+        sys.exit(1)
+
+    if aircraft >= len(aircraft_list):
+        click.echo(f"Aircraft index {aircraft} out of range (0–{len(aircraft_list)-1}).", err=True)
+        sys.exit(1)
+
+    ac = aircraft_list[aircraft]
+
+    try:
+        device_models = api.list_device_models()
+        model_map = {
+            m["name"].lower(): m["productID"]
+            for m in device_models
+            if m.get("name") and m.get("productID") is not None
+        }
+    except Exception as e:
+        click.echo(f"Warning: could not fetch device models: {e}", err=True)
+        model_map = {}
+
+    device_type_map: dict = {}
+    for dev in ac.devices:
+        product_id = model_map.get(dev.name.lower())
+        if product_id is not None:
+            device_type_map[dev.name] = product_id
+
+    # --- Collect cards to process ---
+    detector = SDCardDetector()
+    # _we_mounted: mount points we brought up that should be torn down on exit
+    _we_mounted: list = []
+
+    # Each entry: {'mount': Path, 'card_serial': str, 'device_path': str|None}
+    raw_cards: list = []
+
+    if device:
+        dev_path = Path(device)
+        if dev_path.is_block_device():
+            from avcardtool.core import resolve_device_mount_point, get_mount_point
+            already_mounted = get_mount_point(dev_path) is not None
+            try:
+                mount = resolve_device_mount_point(dev_path, readonly=False)
+            except RuntimeError as e:
+                click.echo(f"Could not mount {dev_path}: {e}", err=True)
+                sys.exit(1)
+            if not already_mounted:
+                _we_mounted.append(str(mount))
+            all_scanned = detector.scan_for_cards()
+            card_info = next((c for c in all_scanned if c.device_path == str(dev_path)), None)
+            serial = card_info.volume_id if card_info and card_info.volume_id else "0"
+            raw_cards.append({'mount': mount, 'card_serial': serial, 'device_path': str(dev_path)})
+        else:
+            raw_cards.append({'mount': dev_path.resolve(), 'card_serial': "0", 'device_path': None})
+    else:
+        scanned = detector.scan_for_cards()
+        candidates = [c for c in scanned if c.mount_point]
+        # Prefer Garmin-formatted cards; fall back to any FAT32 card
+        if not candidates:
+            click.echo("No SD cards found. Insert a card or specify the device path.", err=True)
+            sys.exit(1)
+        garmin_first = sorted(candidates, key=lambda c: (0 if c.is_garmin else 1))
+        for c in garmin_first:
+            raw_cards.append({
+                'mount': Path(c.mount_point),
+                'card_serial': c.volume_id or "0",
+                'device_path': c.device_path,
+            })
+        click.echo(f"Found {len(raw_cards)} SD card(s).")
+
+    # --- Build a plan for each card ---
+    # File info is fetched once per (series_id, issue_name) and reused across cards.
+    file_info_cache: dict = {}   # (series_id, issue_name) -> (files, removable, size)
+
+    # card_plans: list of dicts, one per card that has something to do
+    card_plans: list = []
+    cards_current: list = []  # mount points of cards already up to date
+
+    mock_manifest = {
+        "device_type_map": device_type_map,
+        "entries": [{"taw_database_type": pid} for pid in device_type_map.values()],
+    }
+
+    for raw in raw_cards:
+        mount = raw['mount']
+        card_serial = raw['card_serial']
+
+        if not mount.exists():
+            click.echo(f"Warning: {mount} does not exist — skipping.", err=True)
+            continue
+
+        # Avionics type
+        target_db_type = _resolve_target_db_type(mount, mock_manifest)
+        if target_db_type is None:
+            if device_type_map:
+                names = ", ".join(f"'{n}'" for n in device_type_map)
+                click.echo(
+                    f"Warning: cannot determine avionics for {mount}.\n"
+                    f"  Create 'avionics.txt' there with one of: {names}",
+                    err=True,
+                )
+            else:
+                click.echo(f"Warning: no device model data for {mount} — skipping.", err=True)
+            continue
+
+        target_dev = next(
+            (d for d in ac.devices if device_type_map.get(d.name) == target_db_type),
+            None,
+        )
+        if target_dev is None:
+            click.echo(f"Warning: db_type 0x{target_db_type:04X} matched no registered device for {mount} — skipping.", err=True)
+            continue
+
+        # Read installed cycles
+        installed_cycles: dict = {}
+        cycles_file = mount / ".navdata_cycles.json"
+        if cycles_file.exists():
+            try:
+                installed_cycles = json.loads(cycles_file.read_text()).get("cycles", {})
+            except Exception:
+                pass
+
+        # Build plan
+        plan = []
+        current_ok = []
+        for avdb in target_dev.avdb_types:
+            installed_issue = installed_cycles.get(avdb.name, {}).get("issue")
+            for s in avdb.series:
+                if not s.installable_issues and s.issues_remaining == 0:
+                    continue
+                if s.installable_issues:
+                    current = s.installable_issues[0]
+                    if current.name != installed_issue:
+                        plan.append((avdb, s, current, installed_issue, "update"))
+                    else:
+                        current_ok.append((avdb.name, installed_issue))
+                installable_names = {i.name for i in s.installable_issues}
+                for issue in s.available_issues:
+                    if issue.name not in installable_names:
+                        if issue.name != installed_issue:
+                            plan.append((avdb, s, issue, installed_issue, "pre-download"))
+                        break
+
+        if not plan:
+            cards_current.append((mount, target_dev.name, current_ok))
+            continue
+
+        # Fetch file sizes (deduplicated across cards by cache key)
+        plan_details = []
+        total_bytes = 0
+        all_removable: set = set()
+        for avdb, s, issue, installed_issue, reason in plan:
+            cache_key = (s.series_id, issue.name)
+            if cache_key not in file_info_cache:
+                try:
+                    issue_files = api.list_files(s.series_id, issue.name)
+                    files = issue_files.main_files + issue_files.auxiliary_files
+                    removable = issue_files.removable_paths
+                    size = sum(f.file_size for f in files if f.file_size)
+                except Exception as e:
+                    click.echo(f"  Warning: could not get file info for {avdb.name}/{issue.name}: {e}", err=True)
+                    files = []
+                    removable = []
+                    size = 0
+                file_info_cache[cache_key] = (files, removable, size)
+            files, removable, size = file_info_cache[cache_key]
+            all_removable.update(removable)
+            plan_details.append((avdb, s, issue, installed_issue, reason, files, removable, size))
+            total_bytes += size
+
+        card_plans.append({
+            'mount': mount,
+            'card_serial': card_serial,
+            'target_dev': target_dev,
+            'target_db_type': target_db_type,
+            'plan_details': plan_details,
+            'current_ok': current_ok,
+            'all_removable': all_removable,
+            'total_bytes': total_bytes,
+        })
+
+    # --- Nothing to do? ---
+    if not card_plans:
+        if cards_current:
+            click.echo("\nAll databases are up to date on all cards.")
+            for mount, avionics, current_ok in cards_current:
+                click.echo(f"\n  {mount}  ({avionics})")
+                for name, cycle in current_ok:
+                    click.echo(f"    ✓ {name}: {cycle}")
+        else:
+            click.echo("\nNo actionable SD cards found.")
+        return
+
+    # --- Display summary: one section per card ---
+    W = 68
+    grand_total = sum(cp['total_bytes'] for cp in card_plans)
+
+    click.echo()
+    click.echo("=" * W)
+    click.echo("{:^{w}}".format("── Navdata Update Plan ──", w=W))
+    click.echo("=" * W)
+    click.echo(f"  Aircraft : {ac.tail_number}")
+    click.echo(f"  Cards    : {len(card_plans)} to update" +
+               (f", {len(cards_current)} already current" if cards_current else ""))
+
+    C1, C2, C3, C4, C5 = 18, 10, 10, 10, 10
+    row = "  {:<{c1}}  {:<{c2}}  {:<{c3}}  {:<{c4}}  {:>{c5}}"
+
+    for i, cp in enumerate(card_plans, 1):
+        click.echo()
+        click.echo(f"  Card {i} of {len(card_plans)}: {cp['mount']}  (serial: {cp['card_serial']})")
+        click.echo(f"  Avionics : {cp['target_dev'].name}")
+        click.echo()
+        click.echo(row.format("Database", "Installed", "New Cycle", "Action", "Size",
+                              c1=C1, c2=C2, c3=C3, c4=C4, c5=C5))
+        click.echo("  " + "─" * (C1 + C2 + C3 + C4 + C5 + 8))
+        for avdb, s, issue, installed_issue, reason, files, removable, size in cp['plan_details']:
+            installed_str = installed_issue or "(none)"
+            action = "pre-DL" if reason == "pre-download" else "update"
+            size_str = _fmt_size(size) if size else "—"
+            click.echo(row.format(avdb.name, installed_str, issue.name, action, size_str,
+                                  c1=C1, c2=C2, c3=C3, c4=C4, c5=C5))
+        if cp['current_ok']:
+            click.echo()
+            click.echo("  Already up to date:")
+            for name, cycle in cp['current_ok']:
+                click.echo(f"    ✓ {name}: {cycle}")
+        if cp['all_removable']:
+            click.echo(f"\n  Old files to remove : {len(cp['all_removable'])}")
+        click.echo(f"  Subtotal            : {_fmt_size(cp['total_bytes'])}")
+
+    if cards_current:
+        click.echo()
+        click.echo(f"  Skipping {len(cards_current)} card(s) already up to date:")
+        for mount, avionics, _ in cards_current:
+            click.echo(f"    • {mount}  ({avionics})")
+
+    click.echo()
+    click.echo(f"  Grand total download : {_fmt_size(grand_total)}")
+    click.echo("=" * W)
+    click.echo()
+
+    if not yes:
+        n = len(card_plans)
+        prompt = (
+            f"Proceed with installation on {n} card(s)?"
+            if n > 1
+            else "Proceed with installation?"
+        )
+        click.confirm(prompt, abort=True)
+        click.echo()
+
+    # --- Download and install each card ---
+    cache_dir = data_dir / "navdata" / "cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    for cp in card_plans:
+        mount = cp['mount']
+        card_serial = cp['card_serial']
+        target_dev = cp['target_dev']
+        target_db_type = cp['target_db_type']
+        plan_details = cp['plan_details']
+
+        click.echo(f"\n{'─' * W}")
+        click.echo(f"Processing {mount}  ({target_dev.name})")
+        click.echo(f"{'─' * W}")
+
+        card_dir = data_dir / "navdata" / f"update_{card_serial.replace('-', '')}"
+        card_dir.mkdir(parents=True, exist_ok=True)
+
+        feat_unlk_crcs = _read_feat_unlk_crcs(mount)
+
+        # Create batch session for this card
+        batch_id = None
+        batch_system_ids: list = []
+        try:
+            batch_dbs = [
+                BatchDatabase(series_id=s.series_id, issue_name=issue.name, device_ids=[target_dev.device_id])
+                for _, s, issue, _, _, _, _, _ in plan_details
+            ]
+            batch_id = api.create_batch_update(batch_dbs)
+            batch_plan = api.get_batch_update(batch_id)
+            batch_system_ids = [
+                int(d["serial"]) for d in batch_plan.get("devices", [])
+                if isinstance(d.get("serial"), int)
+            ]
+            click.echo(f"Batch session: {batch_id}")
+        except Exception as e:
+            click.echo(f"Warning: batch session failed ({e}) — using direct auth")
+
+        manifest_entries = []
+
+        for avdb, s, issue, installed_issue, reason, files, removable, size in plan_details:
+            dl_cache_key = f"{s.series_id}/{issue.name}"
+            issue_cache_dir = cache_dir / str(s.series_id) / issue.name
+
+            click.echo(f"\n  {avdb.name}  →  {issue.name}")
+
+            slot = _acquire_dl_slot(cache_dir, dl_cache_key)
+
+            if slot == "wait":
+                click.echo("    Another process is downloading — waiting...")
+                deadline = _time.time() + 1800
+                while _time.time() < deadline:
+                    _time.sleep(5)
+                    slot = _acquire_dl_slot(cache_dir, dl_cache_key)
+                    if slot != "wait":
+                        break
+                if slot == "wait":
+                    click.echo("    Timed out — skipping.", err=True)
+                    continue
+
+            if slot == "cached":
+                click.echo("    Using cached download.")
+                dl_state = _read_dl_state(cache_dir)
+                cached_crcs = dl_state.get(dl_cache_key, {}).get("feature_crcs", {})
+                feat_name = _AVDB_TO_FEAT_UNLK.get(avdb.name)
+                if (feat_name
+                        and feat_unlk_crcs.get(feat_name)
+                        and cached_crcs.get(feat_name)
+                        and feat_unlk_crcs[feat_name] == cached_crcs[feat_name]):
+                    click.echo("    Already installed (CRC match) — skipping.")
+                    continue
+                for file_entry in dl_state.get(dl_cache_key, {}).get("files", []):
+                    src = cache_dir / file_entry["cache_path"]
+                    dst = card_dir / file_entry["cache_path"]
+                    _link_or_copy(src, dst)
+                    manifest_entries.append({
+                        "local_path": file_entry["cache_path"],
+                        "destination": file_entry["destination"],
+                        "avdb_type": avdb.name,
+                        "avdb_type_id": dl_state[dl_cache_key].get("avdb_type_id", avdb.type_id),
+                        "series_id": dl_state[dl_cache_key].get("series_id", s.series_id),
+                        "issue_name": issue.name,
+                        "device_id": target_dev.device_id,
+                        "removable_paths": dl_state[dl_cache_key].get("removable_paths", removable),
+                        "unlock_codes": [],
+                        "taw_database_type": file_entry.get("taw_database_type"),
+                    })
+                continue
+
+            # slot == "mine" — download now
+            try:
+                api.unlock(s.series_id, issue.name, target_dev.device_id, card_serial, batch_id=batch_id)
+                click.echo("    Unlocked.")
+            except Exception as e:
+                click.echo(f"    Warning: unlock failed ({e}) — attempting download anyway.", err=True)
+
+            dl_files = files
+            dl_removable = removable
+            if not dl_files:
+                try:
+                    issue_files = api.list_files(s.series_id, issue.name)
+                    dl_files = issue_files.main_files + issue_files.auxiliary_files
+                    dl_removable = issue_files.removable_paths
+                except Exception as e:
+                    click.echo(f"    Error: could not get file list: {e}", err=True)
+                    _release_dl_slot(cache_dir, dl_cache_key, [], {}, [], avdb.type_id, s.series_id, success=False)
+                    continue
+
+            downloaded: list = []
+            file_entries: list = []
+
+            for db_file in dl_files:
+                def _progress(done: int, total: int, fname: str = db_file.file_name) -> None:
+                    pct = int(done / total * 100) if total else 0
+                    click.echo(f"\r    Downloading {fname}: {pct}%  ", nl=False)
+
+                try:
+                    dest = api.download_file(db_file, issue_cache_dir, progress_callback=_progress)
+                    click.echo(f"\r    Downloaded  {db_file.file_name}  ({dest.stat().st_size:,} bytes)  ")
+
+                    taw_db_type = None
+                    if dest.suffix.lower() == ".taw":
+                        try:
+                            taw_db_type = TAWParser().parse(dest).header.database_type
+                        except Exception:
+                            pass
+
+                    cache_path = str(dest.relative_to(cache_dir))
+                    downloaded.append(dest)
+                    file_entries.append({
+                        "cache_path": cache_path,
+                        "destination": db_file.destination,
+                        "taw_database_type": taw_db_type,
+                    })
+                    _link_or_copy(dest, card_dir / cache_path)
+                    manifest_entries.append({
+                        "local_path": cache_path,
+                        "destination": db_file.destination,
+                        "avdb_type": avdb.name,
+                        "avdb_type_id": avdb.type_id,
+                        "series_id": s.series_id,
+                        "issue_name": issue.name,
+                        "device_id": target_dev.device_id,
+                        "removable_paths": dl_removable,
+                        "unlock_codes": [],
+                        "taw_database_type": taw_db_type,
+                    })
+                except Exception as e:
+                    click.echo(f"\r    Error downloading {db_file.file_name}: {e}  ", err=True)
+
+            feature_crcs: dict = {}
+            for dest in downloaded:
+                if dest.suffix.lower() == ".taw":
+                    feature_crcs.update(_extract_taw_crcs(dest))
+
+            _release_dl_slot(
+                cache_dir, dl_cache_key,
+                files=file_entries,
+                feature_crcs=feature_crcs,
+                removable_paths=dl_removable,
+                avdb_type_id=avdb.type_id,
+                series_id=s.series_id,
+                success=bool(downloaded),
+            )
+
+        if not manifest_entries:
+            click.echo(f"\n  Nothing new to install for {mount}.")
+            continue
+
+        system_ids = batch_system_ids or (
+            [target_dev.system_id_raw] if target_dev.system_id_raw is not None else []
+        )
+        manifest_path = card_dir / "navdata_manifest.json"
+        with open(manifest_path, "w") as f:
+            json.dump({
+                "downloaded_at": datetime.datetime.now().isoformat(),
+                "aircraft": ac.tail_number,
+                "card_serial": card_serial,
+                "system_ids": system_ids,
+                "batch_id": batch_id,
+                "device_database_type": target_db_type,
+                "device_type_map": device_type_map,
+                "entries": manifest_entries,
+            }, f, indent=2)
+
+        click.echo(f"\nInstalling to {mount}...")
+        try:
+            ctx.invoke(navdata_install, sd_card=mount, from_dir=card_dir, yes=True)
+        except SystemExit as e:
+            if e.code and e.code != 0:
+                click.echo(f"Installation failed for {mount} (exit {e.code}).", err=True)
+        except Exception as e:
+            click.echo(f"Installation error for {mount}: {e}", err=True)
+
+    for mp in _we_mounted:
+        try:
+            detector.unmount_card(mp)
+        except Exception:
+            pass
+
+
 # ============================================================================
 # Setup Wizard
 # ============================================================================
@@ -2444,7 +3091,7 @@ def setup_wizard(ctx, config_path: Optional[Path]):
         # Carryd
         click.echo("  Carryd (flight time tracking)")
         if click.confirm("    Enable Carryd?", default=False):
-            carryd_key = click.prompt("    API key (eal_...)")
+            carryd_key = click.prompt("    API key (eab_...)")
             carryd_logbooks = click.prompt(
                 "    Engine logbook UUID(s), comma-separated (leave blank to skip engine times)",
                 default=""

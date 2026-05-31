@@ -375,7 +375,7 @@ class Config:
             "carryd": UploaderConfig(
                 enabled=False,
                 config={
-                    "api_key": "eal_your-api-key",
+                    "api_key": "eab_your-api-key",
                     "engine_logbooks": []
                 }
             )
