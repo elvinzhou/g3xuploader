@@ -43,6 +43,53 @@ class CarrydUploader(FlightDataUploader):
         self.aircraft_id: str = config.get('aircraft_id', '')
         self.engine_logbooks: list = config.get('engine_logbooks', [])
 
+    # def get_current_times(
+    #     self,
+    #     registration: Optional[str] = None,
+    # ) -> Optional[dict]:
+    #     """
+    #     Fetch the aircraft's current recorded times from Carryd.
+    #
+    #     Future API — endpoint not yet implemented on the Carryd side.
+    #     Anticipated shape:
+    #       GET /api/v1/aircraft/<id>          (when self.aircraft_id is set)
+    #       GET /api/v1/aircraft?registration= (fallback)
+    #     Expected response: {
+    #       "aircraft": {
+    #         "id": "...",
+    #         "registration": "N12345",
+    #         "totalTime": 110.4,
+    #         "engineTimes": {"<logbook-uuid>": 98.2}
+    #       }
+    #     }
+    #
+    #     Returns:
+    #         dict with 'totalTime' and 'engineTimes', or None if unavailable.
+    #     """
+    #     if not self.api_key:
+    #         return None
+    #     try:
+    #         if self.aircraft_id:
+    #             url = f"{CARRYD_BASE_URL}/api/v1/aircraft/{self.aircraft_id}"
+    #         elif registration:
+    #             url = f"{CARRYD_BASE_URL}/api/v1/aircraft?registration={registration}"
+    #         else:
+    #             return None
+    #         resp = requests.get(
+    #             url,
+    #             headers={"Authorization": f"Bearer {self.api_key}"},
+    #             timeout=15,
+    #         )
+    #         if resp.status_code == 200:
+    #             aircraft = resp.json().get('aircraft', {})
+    #             return {
+    #                 'totalTime': aircraft.get('totalTime'),
+    #                 'engineTimes': aircraft.get('engineTimes', {}),
+    #             }
+    #     except Exception as e:
+    #         logger.warning(f"Carryd get_current_times failed: {e}")
+    #     return None
+
     def authenticate(self) -> bool:
         if not self.api_key:
             logger.error("Carryd API key not configured")
@@ -133,6 +180,22 @@ class CarrydUploader(FlightDataUploader):
                 service=self.SERVICE_NAME,
                 message="Carryd API key not configured"
             )
+
+        # Uncomment once GET /api/v1/aircraft is available to skip redundant pushes.
+        # current = self.get_current_times(registration=registration)
+        # if current is not None:
+        #     times_match = current.get('totalTime') == payload['totalTime']
+        #     engines_match = all(
+        #         current.get('engineTimes', {}).get(k) == v
+        #         for k, v in payload.get('engineTimes', {}).items()
+        #     )
+        #     if times_match and engines_match:
+        #         logger.info("Carryd: times already current, skipping upload")
+        #         return UploadResult(
+        #             success=True,
+        #             service=self.SERVICE_NAME,
+        #             message="Already current (no update needed)",
+        #         )
 
         try:
             response = requests.post(

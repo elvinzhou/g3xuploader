@@ -601,6 +601,8 @@ def auto_process(ctx, path: Path, service: tuple, skip_uploads: bool):
                             'file_date_key': _log_date_key(_newest),
                             'airframe_hours': _nfd.metadata.airframe_hours_start,
                             'engine_hours': _nfd.metadata.engine_hours_start,
+                            'aircraft_ident': _nfd.metadata.aircraft_ident,
+                            'date': _nfd.metadata.date,
                         }
                 except Exception:
                     pass
@@ -770,6 +772,60 @@ def auto_process(ctx, path: Path, service: tuple, skip_uploads: bool):
             upload_results,
             flight_fingerprint=fingerprint
         )
+
+    # When no flights were found but a non-flight file provided authoritative
+    # times, we can still keep Carryd in sync using those values directly.
+    # This requires the Carryd GET endpoint (get_current_times) so we can
+    # compare before pushing and avoid spurious updates.
+    #
+    # Uncomment the block below once GET /api/v1/aircraft is available.
+    #
+    # if override_meta and not pending_uploads and not skip_uploads \
+    #         and 'carryd' in upload_services:
+    #     uploader_cfg = cfg.flight_data.uploaders.get('carryd')
+    #     if uploader_cfg and uploader_cfg.enabled:
+    #         from avcardtool.flight_data.uploaders.carryd import CarrydUploader
+    #         uploader_config = dict(uploader_cfg.config)
+    #         uploader_config['enabled'] = uploader_cfg.enabled
+    #         uploader_config['data_dir'] = cfg.system.data_dir
+    #         uploader_config['debug'] = cfg.system.debug
+    #         carryd = CarrydUploader(uploader_config)
+    #
+    #         # Check what Carryd already has before pushing.
+    #         current = carryd.get_current_times(
+    #             registration=override_meta.get('aircraft_ident')
+    #         )
+    #         hobbs_changed = (
+    #             current is None
+    #             or current.get('totalTime') != override_meta['airframe_hours']
+    #         )
+    #         # Build engine_times dict if logbooks are configured.
+    #         engine_times = {}
+    #         if carryd.engine_logbooks and override_meta['engine_hours'] is not None:
+    #             engine_times[carryd.engine_logbooks[0]] = override_meta['engine_hours']
+    #         engines_changed = any(
+    #             (current or {}).get('engineTimes', {}).get(k) != v
+    #             for k, v in engine_times.items()
+    #         ) if current else bool(engine_times)
+    #
+    #         if hobbs_changed or engines_changed:
+    #             synthetic_summary = {
+    #                 'aircraft_ident': override_meta['aircraft_ident'],
+    #                 'date': override_meta['date'],
+    #                 'hobbs': {'ending_hours': override_meta['airframe_hours']},
+    #                 'tach': {'ending_hours': override_meta['engine_hours']},
+    #             }
+    #             # upload_flight expects a FlightData for debug file naming only;
+    #             # pass None — the debug branch is guarded by self.debug and
+    #             # would need a small None-check added to carryd.py if enabled.
+    #             result = carryd.upload_flight(None, synthetic_summary)
+    #             status = '✓' if result.success else '✗'
+    #             click.echo(
+    #                 f"\n  Carryd no-flight sync ({override_meta['file']}): "
+    #                 f"{status} {result.message}"
+    #             )
+    #         else:
+    #             click.echo(f"\n  Carryd already current — no sync needed")
 
     # Summary
     click.echo(f"\n{'='*60}")
