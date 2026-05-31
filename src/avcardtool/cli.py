@@ -1793,6 +1793,9 @@ def navdata_install(ctx, sd_card: Optional[Path], from_dir: Optional[Path], yes:
             "gadmTailNumber": tail_number,
             "gadmFleetMetadata": existing_gadm.get("gadmFleetMetadata"),
         }
+        if gadm_meta_path.exists():
+            from avcardtool.navdata.garmin.taw_parser import _clear_readonly
+            _clear_readonly(gadm_meta_path)
         gadm_meta_path.write_text(json.dumps(gadm))
         click.echo("Updated .gadm.meta")
     except Exception as e:
