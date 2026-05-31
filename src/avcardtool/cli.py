@@ -2514,9 +2514,21 @@ def navdata_update(ctx, device: Optional[Path], aircraft: int, yes: bool):
             click.echo("No SD cards found. Insert a card or specify the device path.", err=True)
             sys.exit(1)
         garmin_first = sorted(candidates, key=lambda c: (0 if c.is_garmin else 1))
+        from avcardtool.core import resolve_device_mount_point, get_mount_point
+        from avcardtool.core.utils import _is_mounted_readonly
         for c in garmin_first:
+            dev_path = Path(c.device_path) if c.device_path else None
+            mount = Path(c.mount_point)
+            if dev_path and dev_path.is_block_device():
+                if _is_mounted_readonly(dev_path):
+                    click.echo(f"  {mount}: mounted read-only, remounting rw...")
+                try:
+                    mount = resolve_device_mount_point(dev_path, readonly=False)
+                except RuntimeError as e:
+                    click.echo(f"  Could not get rw mount for {dev_path}: {e}", err=True)
+                    continue
             raw_cards.append({
-                'mount': Path(c.mount_point),
+                'mount': mount,
                 'card_serial': c.volume_id or "0",
                 'device_path': c.device_path,
             })
