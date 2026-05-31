@@ -558,9 +558,59 @@ def auto_process(ctx, path: Path, service: tuple, skip_uploads: bool):
         click.echo("\nDone. Only flights recorded after this point will be uploaded.")
         sys.exit(0)
 
-    upload_services = list(service) if service else []
+    # Sort files chronologically using the timestamp in Garmin filenames
+    # (log_YYYYMMDD_HHMMSS_...).  This ordering is required so that
+    # pending_uploads[-1] is always the most recently recorded flight.
+    import re as _re
 
-    # Process each file
+    def _log_date_key(p: Path) -> str:
+        m = _re.search(r'log_(\d{8}_\d{6})', p.name)
+        return m.group(1) if m else p.name
+
+    log_files.sort(key=_log_date_key)
+
+    # Determine upload services once (same for every file in this batch).
+    if service:
+        upload_services = list(service)
+    else:
+        upload_services = []
+        for service_name in cfg.flight_data.uploaders:
+            if cfg.flight_data.uploaders[service_name].enabled:
+                upload_services.append(service_name)
+
+    # Pre-scan the newest unprocessed file for a non-flight override.
+    #
+    # If the most recent recording is a ground power cycle (not a flight),
+    # the avionics recorded its internal Hobbs and engine hours in that
+    # file's #airframe_info header.  Those starting values are more
+    # authoritative than whatever our algorithm calculated as the ending
+    # hours of the previous flight, so we'll substitute them below.
+    override_meta: Optional[dict] = None
+    _unprocessed = [f for f in log_files if not processed_db.is_processed(hash_file(f))]
+    if _unprocessed:
+        _newest = _unprocessed[-1]
+        for _PC in PROCESSORS:
+            _p = _PC()
+            if _p.detect_log_format(_newest):
+                try:
+                    _nfd = _p.parse_log(_newest)
+                    _nan = FlightDataAnalyzer(cfg.flight_data).analyze(_nfd)
+                    if not _nan.detection.is_flight:
+                        override_meta = {
+                            'file': _newest.name,
+                            'file_date_key': _log_date_key(_newest),
+                            'airframe_hours': _nfd.metadata.airframe_hours_start,
+                            'engine_hours': _nfd.metadata.engine_hours_start,
+                        }
+                except Exception:
+                    pass
+                break
+
+    # Process each file — detect flights and collect pending uploads.
+    # Uploads are deferred until after the loop so the non-flight override
+    # can be applied to the most recently dated flight before any data is sent.
+    pending_uploads: list = []  # [(file_hash, log_file, flight_data, analysis, fingerprint)]
+
     stats = {
         'total': len(log_files),
         'already_processed': 0,
@@ -638,60 +688,88 @@ def auto_process(ctx, path: Path, service: tuple, skip_uploads: bool):
                 )
                 continue
 
-            # Upload to services
-            analysis_summary = analyzer.analyze_summary(flight_data)
-
-            # Determine which services to upload to
-            if service:
-                upload_services = list(service)
-            else:
-                upload_services = []
-                for service_name in cfg.flight_data.uploaders:
-                    if cfg.flight_data.uploaders[service_name].enabled:
-                        upload_services.append(service_name)
-
-            upload_results = {}
-            for service_name in upload_services:
-                if service_name not in UPLOADERS:
-                    continue
-
-                uploader_cfg = cfg.flight_data.uploaders.get(service_name)
-                if uploader_cfg is None:
-                    continue
-                uploader_config = dict(uploader_cfg.config)
-                uploader_config['enabled'] = uploader_cfg.enabled
-                uploader_config['data_dir'] = cfg.system.data_dir
-                uploader_config['debug'] = cfg.system.debug
-                UploaderClass = UPLOADERS[service_name]
-                uploader = UploaderClass(uploader_config)
-
-                result = uploader.upload_flight(flight_data, analysis_summary)
-                upload_results[service_name] = {
-                    'success': result.success,
-                    'message': result.message,
-                    'url': result.url
-                }
-
-                if result.success:
-                    click.echo(f"    ✓ {service_name}")
-                    stats['upload_success'] += 1
-                else:
-                    click.echo(f"    ✗ {service_name}: {result.message}")
-                    stats['upload_failed'] += 1
-
-            # Mark as processed
-            processed_db.mark_processed(
-                file_hash,
-                log_file,
-                analysis.aircraft_ident,
-                True,
-                upload_results,
-                flight_fingerprint=fingerprint
-            )
+            pending_uploads.append((file_hash, log_file, flight_data, analysis, fingerprint))
 
         except Exception as e:
             logger.exception(f"Error processing {log_file}")
             click.echo(f"  ✗ Error: {e}", err=True)
+
+    # Build analysis summaries and apply the non-flight override where applicable.
+    #
+    # The override targets only pending_uploads[-1] — the most recently dated
+    # flight — because the non-flight file immediately follows it.  The
+    # condition is: override file timestamp > flight file timestamp.
+    pending_with_summaries: list = []
+    for idx, (fh, lf, fd, an, fp) in enumerate(pending_uploads):
+        summary = FlightDataAnalyzer(cfg.flight_data).analyze_summary(fd)
+        is_most_recent = (idx == len(pending_uploads) - 1)
+
+        if is_most_recent and override_meta:
+            if _log_date_key(lf) < override_meta['file_date_key']:
+                new_hobbs = override_meta['airframe_hours']
+                old_hobbs = (summary.get('hobbs') or {}).get('ending_hours')
+                if new_hobbs is not None and new_hobbs != old_hobbs:
+                    summary = {**summary, 'hobbs': {**(summary.get('hobbs') or {}),
+                                                     'ending_hours': new_hobbs}}
+                    click.echo(
+                        f"\n  {lf.name}: Hobbs ending adjusted "
+                        f"{old_hobbs:.2f}h → {new_hobbs:.2f}h "
+                        f"(authoritative value from {override_meta['file']})"
+                    )
+
+                new_tach = override_meta['engine_hours']
+                old_tach = (summary.get('tach') or {}).get('ending_hours')
+                if new_tach is not None and new_tach != old_tach:
+                    summary = {**summary, 'tach': {**(summary.get('tach') or {}),
+                                                    'ending_hours': new_tach}}
+                    click.echo(
+                        f"  {lf.name}: Tach ending adjusted "
+                        f"{old_tach:.2f}h → {new_tach:.2f}h "
+                        f"(authoritative value from {override_meta['file']})"
+                    )
+
+        pending_with_summaries.append((fh, lf, fd, an, fp, summary))
+
+    # Upload all pending flights
+    for file_hash, log_file, flight_data, analysis, fingerprint, analysis_summary in pending_with_summaries:
+        upload_results = {}
+        for service_name in upload_services:
+            if service_name not in UPLOADERS:
+                continue
+
+            uploader_cfg = cfg.flight_data.uploaders.get(service_name)
+            if uploader_cfg is None:
+                continue
+            uploader_config = dict(uploader_cfg.config)
+            uploader_config['enabled'] = uploader_cfg.enabled
+            uploader_config['data_dir'] = cfg.system.data_dir
+            uploader_config['debug'] = cfg.system.debug
+            UploaderClass = UPLOADERS[service_name]
+            uploader = UploaderClass(uploader_config)
+
+            result = uploader.upload_flight(flight_data, analysis_summary)
+            upload_results[service_name] = {
+                'success': result.success,
+                'message': result.message,
+                'url': result.url
+            }
+
+            if result.success:
+                click.echo(f"    ✓ {service_name}")
+                stats['upload_success'] += 1
+            else:
+                click.echo(f"    ✗ {service_name}: {result.message}")
+                stats['upload_failed'] += 1
+
+        # Mark as processed
+        processed_db.mark_processed(
+            file_hash,
+            log_file,
+            analysis.aircraft_ident,
+            True,
+            upload_results,
+            flight_fingerprint=fingerprint
+        )
 
     # Summary
     click.echo(f"\n{'='*60}")
