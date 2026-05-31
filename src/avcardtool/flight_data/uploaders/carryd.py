@@ -28,7 +28,9 @@ class CarrydUploader(FlightDataUploader):
 
     Configuration:
         enabled: bool - Enable/disable this uploader
-        api_key: str - Carryd API key (format: eal_...)
+        api_key: str - Carryd API key (format: eab_...)
+        aircraft_id: str - Aircraft UUID. Takes precedence over registration
+            when supplied; useful when multiple aircraft share a tail number.
         engine_logbooks: list[str] - Ordered list of engine logbook UUIDs.
             Index 0 is the primary engine. Omit to update only total time.
     """
@@ -38,6 +40,7 @@ class CarrydUploader(FlightDataUploader):
     def __init__(self, config: dict):
         super().__init__(config)
         self.api_key = config.get('api_key', '')
+        self.aircraft_id: str = config.get('aircraft_id', '')
         self.engine_logbooks: list = config.get('engine_logbooks', [])
 
     def authenticate(self) -> bool:
@@ -87,7 +90,7 @@ class CarrydUploader(FlightDataUploader):
             )
 
         registration = analysis_results.get('aircraft_ident')
-        if not registration:
+        if not registration and not self.aircraft_id:
             return UploadResult(
                 success=False,
                 service=self.SERVICE_NAME,
@@ -108,12 +111,16 @@ class CarrydUploader(FlightDataUploader):
         if not recorded_at:
             recorded_at = analysis_results.get('date')
 
-        payload = {
-            "registration": registration,
-            "totalTime": hobbs['ending_hours'],
-            "engineTimes": engine_times,
-            "recordedAt": recorded_at,
-        }
+        # aircraftId takes precedence over registration when both are available
+        payload: dict = {"totalTime": hobbs['ending_hours']}
+        if self.aircraft_id:
+            payload["aircraftId"] = self.aircraft_id
+        else:
+            payload["registration"] = registration
+        if engine_times:
+            payload["engineTimes"] = engine_times
+        if recorded_at:
+            payload["recordedAt"] = recorded_at
 
         if self.debug:
             debug_filename = f"carryd_{Path(flight_data.file_path).stem}.json"

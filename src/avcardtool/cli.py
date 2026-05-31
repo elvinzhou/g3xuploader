@@ -2957,7 +2957,7 @@ def setup_wizard(ctx, config_path: Optional[Path]):
         # Carryd
         click.echo("  Carryd (flight time tracking)")
         if click.confirm("    Enable Carryd?", default=False):
-            carryd_key = click.prompt("    API key (eal_...)")
+            carryd_key = click.prompt("    API key (eab_...)")
             carryd_logbooks = click.prompt(
                 "    Engine logbook UUID(s), comma-separated (leave blank to skip engine times)",
                 default=""
