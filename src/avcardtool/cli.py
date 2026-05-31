@@ -3394,27 +3394,31 @@ def self_update(ctx, version: Optional[str]):
         os.execvp('sudo', args)
         # execvp replaces the current process; this line is unreachable
 
-    # Refuse to overwrite a local development (editable) install.
+    click.echo(f"Current version: v{__version__}")
+
+    # Check whether this is a development (editable) install.  If so, skip
+    # the pip upgrade — the developer manages the code via git — but still
+    # refresh system files so udev rules and systemd units stay current.
     pip_show = subprocess.run(
         [sys.executable, '-m', 'pip', 'show', 'avcardtool'],
         capture_output=True, text=True
     )
+    dev_path = None
     for line in pip_show.stdout.splitlines():
         if line.lower().startswith('editable project location'):
             dev_path = line.split(':', 1)[1].strip()
-            click.echo(
-                f"Development install detected ({dev_path}).\n"
-                "self-update only applies to production installs. "
-                "Use git pull in your repository instead.",
-                err=True
-            )
-            sys.exit(0)
+            break
+
+    if dev_path:
+        click.echo(f"Development install ({dev_path}) — skipping pip upgrade.")
+        click.echo("Updating system files...")
+        _update_system_files(ctx, None)
+        return
 
     repo = "git+https://github.com/elvinzhou/g3xuploader.git"
     package = f"{repo}@v{version}" if version else repo
     target = f"v{version}" if version else "latest"
 
-    click.echo(f"Current version: v{__version__}")
     click.echo(f"Updating avcardtool to {target}...")
 
     # Derive the install prefix from the binary's own location so pip always
