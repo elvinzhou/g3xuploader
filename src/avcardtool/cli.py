@@ -3421,27 +3421,17 @@ def self_update(ctx, version: Optional[str]):
 
     click.echo(f"Updating avcardtool to {target}...")
 
-    # Derive the install prefix from the binary's own location so pip always
-    # installs alongside the running binary regardless of whether we're called
-    # directly, via sudo, or by the systemd timer.
-    #
-    # e.g. /usr/local/bin/avcardtool  → prefix /usr/local
-    #      ~/.local/bin/avcardtool    → prefix ~/.local
-    #
-    # Without this, sudo changes HOME and sys.executable may point to the
-    # system Python while the package lives in the user's prefix — causing
-    # pip to install to the wrong site-packages directory.
-    binary = Path(sys.argv[0]).resolve()
-    prefix = binary.parent.parent  # bin/../ == prefix
-
-    pip_cmd = [sys.executable, '-m', 'pip', 'install', '--upgrade',
-               '--prefix', str(prefix), package]
-
-    result = subprocess.run(
-        pip_cmd,
-        capture_output=True,
-        text=True
-    )
+    # Run pip. On Debian/Raspberry Pi OS with Python 3.11+ (PEP 668), pip
+    # refuses to install into the system environment without the
+    # --break-system-packages flag. Try without it first; if pip rejects
+    # with the managed-environment error, retry with the flag.
+    pip_base = [sys.executable, '-m', 'pip', 'install', '--upgrade', package]
+    result = subprocess.run(pip_base, capture_output=True, text=True)
+    if result.returncode != 0 and 'externally-managed' in (result.stdout + result.stderr).lower():
+        result = subprocess.run(
+            pip_base + ['--break-system-packages'],
+            capture_output=True, text=True
+        )
 
     if result.returncode != 0:
         click.echo(f"Update failed:\n{result.stderr.strip()}", err=True)
