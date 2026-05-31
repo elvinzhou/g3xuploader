@@ -2602,7 +2602,9 @@ def navdata_update(ctx, device: Optional[Path], aircraft: int, yes: bool):
                     if current.name != installed_issue:
                         plan.append((avdb, s, current, installed_issue, "update"))
                     else:
-                        current_ok.append((avdb.name, installed_issue))
+                        key = (avdb.name, installed_issue)
+                        if key not in {(n, i) for n, i in current_ok}:
+                            current_ok.append((avdb.name, installed_issue))
                 installable_names = {i.name for i in s.installable_issues}
                 for issue in s.available_issues:
                     if issue.name not in installable_names:
@@ -2758,6 +2760,7 @@ def navdata_update(ctx, device: Optional[Path], aircraft: int, yes: bool):
             click.echo(f"Warning: batch session failed ({e}) — using direct auth")
 
         manifest_entries = []
+        crc_confirmed: dict = {}  # avdb.name -> issue.name for CRC-matched items
 
         for avdb, s, issue, installed_issue, reason, files, removable, size in plan_details:
             dl_cache_key = f"{s.series_id}/{issue.name}"
@@ -2789,6 +2792,7 @@ def navdata_update(ctx, device: Optional[Path], aircraft: int, yes: bool):
                         and cached_crcs.get(feat_name)
                         and feat_unlk_crcs[feat_name] == cached_crcs[feat_name]):
                     click.echo("    Already installed (CRC match) — skipping.")
+                    crc_confirmed[avdb.name] = issue.name
                     continue
                 for file_entry in dl_state.get(dl_cache_key, {}).get("files", []):
                     src = cache_dir / file_entry["cache_path"]
@@ -2886,6 +2890,23 @@ def navdata_update(ctx, device: Optional[Path], aircraft: int, yes: bool):
 
         if not manifest_entries:
             click.echo(f"\n  Nothing new to install for {mount}.")
+            if crc_confirmed:
+                # The plan thought these were missing, but CRCs prove they're
+                # current. Record them so the next plan shows them as up to date.
+                try:
+                    cycles_file = mount / ".navdata_cycles.json"
+                    existing: dict = {}
+                    if cycles_file.exists():
+                        try:
+                            existing = json.loads(cycles_file.read_text()).get("cycles", {})
+                        except Exception:
+                            pass
+                    for db_name, issue_name in crc_confirmed.items():
+                        existing[db_name] = {"issue": issue_name}
+                    cycles_file.write_text(json.dumps({"cycles": existing}, indent=2))
+                    click.echo(f"  Updated .navdata_cycles.json with {len(crc_confirmed)} confirmed cycle(s).")
+                except Exception as e:
+                    click.echo(f"  Warning: could not update .navdata_cycles.json: {e}", err=True)
             continue
 
         system_ids = batch_system_ids or (
