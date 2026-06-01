@@ -3607,7 +3607,6 @@ def self_update(ctx, version: Optional[str]):
         click.echo("Update complete.")
 
     _update_system_files(ctx, new_version)
-    click.echo("Restart avcardtool service to apply.")
 
 
 def _update_system_files(ctx: click.Context, version: Optional[str]) -> None:
@@ -3733,6 +3732,29 @@ def _update_system_files(ctx: click.Context, version: Optional[str]) -> None:
             click.echo("  Reloaded udev rules and systemd daemon.")
         except Exception as e:
             click.echo(f"  Warning: could not reload system: {e}", err=True)
+
+        # Restart any currently-running avcardtool service instances so they
+        # pick up the new binary and unit files without requiring a manual step.
+        try:
+            list_result = subprocess.run(
+                ["systemctl", "list-units", "--state=running", "--no-legend",
+                 "--no-pager", "avcardtool-*"],
+                capture_output=True, text=True,
+            )
+            running_units = [
+                line.split()[0]
+                for line in list_result.stdout.splitlines()
+                if line.strip() and not line.strip().startswith("●")
+            ]
+            # Skip the self-update service itself to avoid cutting off our own process
+            running_units = [u for u in running_units if "self-update" not in u]
+            if running_units:
+                subprocess.run(["systemctl", "restart"] + running_units, capture_output=True)
+                click.echo(f"  Restarted: {', '.join(running_units)}")
+            else:
+                click.echo("  No running avcardtool services to restart.")
+        except Exception as e:
+            click.echo(f"  Warning: could not restart services: {e}", err=True)
 
     # Enable or disable the self-update timer based on config
     auto_self_update = cfg.system.auto_self_update if cfg else True
