@@ -2577,35 +2577,31 @@ def navdata_update(ctx, device: Optional[Path], aircraft: int, yes: bool):
             None,
         )
         if target_dev is None:
-            # Try to identify the unknown db_type from the full model catalogue
-            # so the message tells the user what device the card was formatted for.
-            id_to_name = {v: k for k, v in model_map.items()}
-            known_name = id_to_name.get(target_db_type)
-            registered = ", ".join(
-                f"{d.name} (0x{device_type_map[d.name]:04X})"
-                for d in ac.devices
-                if d.name in device_type_map
-            ) or "(none resolved)"
-            if known_name:
+            # device_type_map is built from model_map name matches, which can miss
+            # devices whose name in list_aircraft() differs from list_device_models().
+            # If exactly one registered device couldn't be resolved by name, trust the
+            # card's declared db_type (from feat_unlk.dat) and pair them.
+            unresolved = [d for d in ac.devices if d.name not in device_type_map]
+            if len(unresolved) == 1:
+                target_dev = unresolved[0]
+                device_type_map[target_dev.name] = target_db_type
                 click.echo(
-                    f"Warning: {mount} is formatted for '{known_name}' "
-                    f"(db_type 0x{target_db_type:04X}), which is not registered "
-                    f"on aircraft {ac.tail_number}.\n"
-                    f"  Registered devices: {registered}\n"
-                    f"  To override, create avionics.txt on the card with one of: "
-                    f"{', '.join(device_type_map.keys())}",
-                    err=True,
+                    f"  Note: '{target_dev.name}' not found in Garmin device model list "
+                    f"by name — using card's declared db_type 0x{target_db_type:04X}."
                 )
             else:
+                registered = ", ".join(
+                    f"{d.name} (0x{device_type_map[d.name]:04X})"
+                    for d in ac.devices if d.name in device_type_map
+                ) or "(none resolved)"
                 click.echo(
-                    f"Warning: db_type 0x{target_db_type:04X} on {mount} is not "
-                    f"recognised and matched no registered device for {ac.tail_number}.\n"
+                    f"Warning: db_type 0x{target_db_type:04X} on {mount} matched no "
+                    f"registered device for {ac.tail_number}.\n"
                     f"  Registered devices: {registered}\n"
-                    f"  To override, create avionics.txt on the card with one of: "
-                    f"{', '.join(device_type_map.keys())}",
+                    f"  Create avionics.txt on the card with the device name to override.",
                     err=True,
                 )
-            continue
+                continue
 
         # Read installed cycles
         installed_cycles: dict = {}
