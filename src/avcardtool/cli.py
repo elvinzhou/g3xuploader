@@ -2483,6 +2483,12 @@ def navdata_update(ctx, device: Optional[Path], aircraft: int, yes: bool):
         if product_id is not None:
             device_type_map[dev.name] = product_id
 
+    click.echo(f"Registered devices on {ac.tail_number}:")
+    for dev in ac.devices:
+        pid = device_type_map.get(dev.name)
+        pid_str = f"  db_type=0x{pid:04X}" if pid is not None else "  (product ID unresolved)"
+        click.echo(f"  • {dev.name}{pid_str}")
+
     # --- Collect cards to process ---
     detector = SDCardDetector()
     # _we_mounted: mount points we brought up that should be torn down on exit
