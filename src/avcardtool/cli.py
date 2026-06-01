@@ -2577,7 +2577,34 @@ def navdata_update(ctx, device: Optional[Path], aircraft: int, yes: bool):
             None,
         )
         if target_dev is None:
-            click.echo(f"Warning: db_type 0x{target_db_type:04X} matched no registered device for {mount} — skipping.", err=True)
+            # Try to identify the unknown db_type from the full model catalogue
+            # so the message tells the user what device the card was formatted for.
+            id_to_name = {v: k for k, v in model_map.items()}
+            known_name = id_to_name.get(target_db_type)
+            registered = ", ".join(
+                f"{d.name} (0x{device_type_map[d.name]:04X})"
+                for d in ac.devices
+                if d.name in device_type_map
+            ) or "(none resolved)"
+            if known_name:
+                click.echo(
+                    f"Warning: {mount} is formatted for '{known_name}' "
+                    f"(db_type 0x{target_db_type:04X}), which is not registered "
+                    f"on aircraft {ac.tail_number}.\n"
+                    f"  Registered devices: {registered}\n"
+                    f"  To override, create avionics.txt on the card with one of: "
+                    f"{', '.join(device_type_map.keys())}",
+                    err=True,
+                )
+            else:
+                click.echo(
+                    f"Warning: db_type 0x{target_db_type:04X} on {mount} is not "
+                    f"recognised and matched no registered device for {ac.tail_number}.\n"
+                    f"  Registered devices: {registered}\n"
+                    f"  To override, create avionics.txt on the card with one of: "
+                    f"{', '.join(device_type_map.keys())}",
+                    err=True,
+                )
             continue
 
         # Read installed cycles
