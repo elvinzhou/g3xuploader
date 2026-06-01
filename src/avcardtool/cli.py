@@ -512,17 +512,12 @@ def auto_process(ctx, path: Path, service: tuple, skip_uploads: bool):
 
     # Find all G3X CSV files
     log_files = []
-    seen_paths: set = set()
     search_dirs = [path / "data_log", path]  # Check data_log folder first
 
     for search_dir in search_dirs:
         if not search_dir.exists():
             continue
-        # rglob to pick up Garmin's year/month subdirectory layouts
-        for csv_file in search_dir.rglob("*.csv"):
-            if csv_file in seen_paths:
-                continue
-            seen_paths.add(csv_file)
+        for csv_file in search_dir.glob("*.csv"):
             try:
                 with open(csv_file, 'r') as f:
                     first_line = f.readline()
@@ -784,25 +779,54 @@ def auto_process(ctx, path: Path, service: tuple, skip_uploads: bool):
             flight_fingerprint=fingerprint
         )
 
-    # Carryd: submit once using the most recent flight's summary.
-    # The most recent entry in pending_with_summaries already has the non-flight
-    # override applied to its Hobbs/tach ending hours (from the pre-scan above).
+    # Carryd: submit once using the flight with the latest avionics-recorded
+    # timestamp across all pending flights.  Using the avionics date (from
+    # OOOI data inside the file) rather than the filename timestamp means
+    # an older SD card inserted later cannot overwrite Carryd with stale data
+    # — we persist the last submitted timestamp and skip if not newer.
     if do_carryd and pending_with_summaries:
-        _, _, fd_latest, an_latest, _, summary_latest = pending_with_summaries[-1]
-        uploader_cfg = cfg.flight_data.uploaders.get('carryd')
-        if uploader_cfg and uploader_cfg.enabled and 'carryd' in UPLOADERS:
-            uploader_config = dict(uploader_cfg.config)
-            uploader_config['enabled'] = uploader_cfg.enabled
-            uploader_config['data_dir'] = cfg.system.data_dir
-            uploader_config['debug'] = cfg.system.debug
-            carryd_uploader = UPLOADERS['carryd'](uploader_config)
-            result = carryd_uploader.upload_flight(fd_latest, summary_latest)
-            if result.success:
-                click.echo(f"\n  Carryd (latest flight): ✓ {result.message}")
-                stats['upload_success'] += 1
-            else:
-                click.echo(f"\n  Carryd (latest flight): ✗ {result.message}")
-                stats['upload_failed'] += 1
+        def _avionics_ts(summary: dict) -> str:
+            oooi = summary.get('oooi') or {}
+            return oooi.get('off_time') or oooi.get('out_time') or summary.get('date') or ''
+
+        best = max(pending_with_summaries, key=lambda t: _avionics_ts(t[5]))
+        _, _, fd_best, _, _, summary_best = best
+        candidate_ts = _avionics_ts(summary_best)
+
+        carryd_state_path = Path(cfg.system.data_dir) / 'carryd_state.json'
+        carryd_state: dict = {}
+        try:
+            carryd_state = json.loads(carryd_state_path.read_text())
+        except Exception:
+            pass
+        last_submitted_ts = carryd_state.get('last_submitted_at', '')
+
+        if candidate_ts and last_submitted_ts and candidate_ts <= last_submitted_ts:
+            click.echo(
+                f"\n  Carryd: skipping — flight at {candidate_ts} is not newer "
+                f"than last submission ({last_submitted_ts})"
+            )
+        else:
+            uploader_cfg = cfg.flight_data.uploaders.get('carryd')
+            if uploader_cfg and uploader_cfg.enabled and 'carryd' in UPLOADERS:
+                uploader_config = dict(uploader_cfg.config)
+                uploader_config['enabled'] = uploader_cfg.enabled
+                uploader_config['data_dir'] = cfg.system.data_dir
+                uploader_config['debug'] = cfg.system.debug
+                carryd_uploader = UPLOADERS['carryd'](uploader_config)
+                result = carryd_uploader.upload_flight(fd_best, summary_best)
+                if result.success:
+                    click.echo(f"\n  Carryd: ✓ {result.message}")
+                    stats['upload_success'] += 1
+                    if candidate_ts:
+                        carryd_state['last_submitted_at'] = candidate_ts
+                        try:
+                            carryd_state_path.write_text(json.dumps(carryd_state, indent=2))
+                        except Exception as e:
+                            click.echo(f"  Warning: could not save Carryd state: {e}", err=True)
+                else:
+                    click.echo(f"\n  Carryd: ✗ {result.message}")
+                    stats['upload_failed'] += 1
 
     # When no flights were found but a non-flight file provided authoritative
     # times, we can still keep Carryd in sync using those values directly.
