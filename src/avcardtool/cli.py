@@ -512,12 +512,17 @@ def auto_process(ctx, path: Path, service: tuple, skip_uploads: bool):
 
     # Find all G3X CSV files
     log_files = []
+    seen_paths: set = set()
     search_dirs = [path / "data_log", path]  # Check data_log folder first
 
     for search_dir in search_dirs:
         if not search_dir.exists():
             continue
-        for csv_file in search_dir.glob("*.csv"):
+        # rglob to pick up Garmin's year/month subdirectory layouts
+        for csv_file in search_dir.rglob("*.csv"):
+            if csv_file in seen_paths:
+                continue
+            seen_paths.add(csv_file)
             try:
                 with open(csv_file, 'r') as f:
                     first_line = f.readline()
@@ -732,10 +737,16 @@ def auto_process(ctx, path: Path, service: tuple, skip_uploads: bool):
 
         pending_with_summaries.append((fh, lf, fd, an, fp, summary))
 
-    # Upload all pending flights
+    # Carryd is submitted once with the most recent flight's summary (after the
+    # non-flight override has been applied) rather than once per flight.
+    # Collect per-flight services separately so we can handle that below.
+    per_flight_services = [s for s in upload_services if s != 'carryd']
+    do_carryd = 'carryd' in upload_services and not skip_uploads
+
+    # Upload all pending flights (excluding Carryd — handled after the loop)
     for file_hash, log_file, flight_data, analysis, fingerprint, analysis_summary in pending_with_summaries:
         upload_results = {}
-        for service_name in upload_services:
+        for service_name in per_flight_services:
             if service_name not in UPLOADERS:
                 continue
 
@@ -772,6 +783,26 @@ def auto_process(ctx, path: Path, service: tuple, skip_uploads: bool):
             upload_results,
             flight_fingerprint=fingerprint
         )
+
+    # Carryd: submit once using the most recent flight's summary.
+    # The most recent entry in pending_with_summaries already has the non-flight
+    # override applied to its Hobbs/tach ending hours (from the pre-scan above).
+    if do_carryd and pending_with_summaries:
+        _, _, fd_latest, an_latest, _, summary_latest = pending_with_summaries[-1]
+        uploader_cfg = cfg.flight_data.uploaders.get('carryd')
+        if uploader_cfg and uploader_cfg.enabled and 'carryd' in UPLOADERS:
+            uploader_config = dict(uploader_cfg.config)
+            uploader_config['enabled'] = uploader_cfg.enabled
+            uploader_config['data_dir'] = cfg.system.data_dir
+            uploader_config['debug'] = cfg.system.debug
+            carryd_uploader = UPLOADERS['carryd'](uploader_config)
+            result = carryd_uploader.upload_flight(fd_latest, summary_latest)
+            if result.success:
+                click.echo(f"\n  Carryd (latest flight): ✓ {result.message}")
+                stats['upload_success'] += 1
+            else:
+                click.echo(f"\n  Carryd (latest flight): ✗ {result.message}")
+                stats['upload_failed'] += 1
 
     # When no flights were found but a non-flight file provided authoritative
     # times, we can still keep Carryd in sync using those values directly.
