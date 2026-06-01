@@ -78,6 +78,7 @@ class Device:
     display_serial: str
     avdb_status: str
     avdb_types: List[AvdbType] = field(default_factory=list)
+    product_id: Optional[int] = None   # productID from API if present (= TAW db_type)
 
 
 @dataclass
@@ -180,6 +181,7 @@ def _parse_avdb_type(raw: dict) -> AvdbType:
 
 def _parse_device(raw: dict) -> Device:
     raw_sid = raw.get("systemId", raw.get("serial"))
+    raw_pid = raw.get("productID") or raw.get("productId") or raw.get("product_id")
     return Device(
         device_id=raw.get("id", 0),
         name=raw.get("name", ""),
@@ -188,6 +190,7 @@ def _parse_device(raw: dict) -> Device:
         display_serial=raw.get("displaySerial", ""),
         avdb_status=raw.get("avdbStatus", ""),
         avdb_types=[_parse_avdb_type(a) for a in raw.get("avdbTypes", [])],
+        product_id=int(raw_pid) if raw_pid is not None else None,
     )
 
 

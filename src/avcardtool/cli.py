@@ -1151,26 +1151,36 @@ def navdata_download(ctx, aircraft: int, device: Optional[int], series: Optional
             # Fall back to frequency heuristic if the API call fails or finds no match.
             primary_db_type = None
             device_type_map: dict = {}  # name → productID, for all devices in this plan
-            device_names = list({dev.name for dev, _, _, _ in plan if dev.name})
-            try:
-                device_models = api.list_device_models()
-                # Build name → productID map (case-insensitive)
-                model_map = {
-                    m["name"].lower(): m["productID"]
-                    for m in device_models
-                    if m.get("name") and m.get("productID") is not None
-                }
-                for dname in device_names:
-                    product_id = model_map.get(dname.lower())
-                    if product_id is not None:
-                        device_type_map[dname] = product_id
-                        if primary_db_type is None:
-                            primary_db_type = product_id
-                        click.echo(f"Device model '{dname}' → productID={product_id} (0x{product_id:04X})")
-                if primary_db_type is None and device_names:
-                    click.echo(f"Warning: device name(s) {device_names!r} not found in /device-models/ — falling back to frequency heuristic")
-            except Exception as e:
-                click.echo(f"Warning: /device-models/ lookup failed ({e}) — falling back to frequency heuristic")
+            plan_devices = list({id(dev): dev for dev, _, _, _ in plan if dev.name}.values())
+            # First: use productID directly from the device object if the API returned it
+            for dev in plan_devices:
+                if dev.product_id is not None:
+                    device_type_map[dev.name] = dev.product_id
+                    if primary_db_type is None:
+                        primary_db_type = dev.product_id
+                    click.echo(f"Device model '{dev.name}' → productID={dev.product_id} (0x{dev.product_id:04X})")
+            # Second: for devices still missing, cross-reference /device-models/ by name
+            unresolved_names = [dev.name for dev in plan_devices if dev.name not in device_type_map]
+            if unresolved_names:
+                try:
+                    device_models = api.list_device_models()
+                    model_map = {
+                        m["name"].lower(): m["productID"]
+                        for m in device_models
+                        if m.get("name") and m.get("productID") is not None
+                    }
+                    for dname in unresolved_names:
+                        product_id = model_map.get(dname.lower())
+                        if product_id is not None:
+                            device_type_map[dname] = product_id
+                            if primary_db_type is None:
+                                primary_db_type = product_id
+                            click.echo(f"Device model '{dname}' → productID={product_id} (0x{product_id:04X})")
+                    still_unresolved = [n for n in unresolved_names if n not in device_type_map]
+                    if still_unresolved:
+                        click.echo(f"Warning: device name(s) {still_unresolved!r} not found in /device-models/ — falling back to frequency heuristic")
+                except Exception as e:
+                    click.echo(f"Warning: /device-models/ lookup failed ({e}) — falling back to frequency heuristic")
 
             if primary_db_type is None:
                 from collections import Counter
@@ -2021,22 +2031,27 @@ def navdata_auto_update(ctx, device: Optional[Path]):
 
     ac = aircraft_list[0]
 
-    try:
-        device_models = api.list_device_models()
-        model_map = {
-            m["name"].lower(): m["productID"]
-            for m in device_models
-            if m.get("name") and m.get("productID") is not None
-        }
-    except Exception as e:
-        _log.warning(f"Could not fetch device models: {e}")
-        model_map = {}
-
     device_type_map: dict = {}
+    # Use productID directly from the API response if available
     for dev in ac.devices:
-        product_id = model_map.get(dev.name.lower())
-        if product_id is not None:
-            device_type_map[dev.name] = product_id
+        if dev.product_id is not None:
+            device_type_map[dev.name] = dev.product_id
+    # Fall back to /device-models/ name matching for devices without a direct productID
+    unresolved_devs = [dev for dev in ac.devices if dev.name not in device_type_map]
+    if unresolved_devs:
+        try:
+            device_models = api.list_device_models()
+            model_map = {
+                m["name"].lower(): m["productID"]
+                for m in device_models
+                if m.get("name") and m.get("productID") is not None
+            }
+            for dev in unresolved_devs:
+                product_id = model_map.get(dev.name.lower())
+                if product_id is not None:
+                    device_type_map[dev.name] = product_id
+        except Exception as e:
+            _log.warning(f"Could not fetch device models: {e}")
 
     # ---------------------------------------------------------------
     # Find SD cards
@@ -2111,8 +2126,17 @@ def navdata_auto_update(ctx, device: Optional[Path]):
             None,
         )
         if target_dev is None:
-            _log.warning(f"  db_type=0x{target_db_type:04X} matched no registered device — skipping")
-            continue
+            unresolved = [d for d in ac.devices if d.name not in device_type_map]
+            if len(unresolved) == 1:
+                target_dev = unresolved[0]
+                device_type_map[target_dev.name] = target_db_type
+                _log.info(
+                    f"  Note: '{target_dev.name}' not in device model list by name "
+                    f"— using card's declared db_type 0x{target_db_type:04X}"
+                )
+            else:
+                _log.warning(f"  db_type=0x{target_db_type:04X} matched no registered device — skipping")
+                continue
 
         _log.info(f"  Avionics: {target_dev.name}")
 
@@ -2466,22 +2490,33 @@ def navdata_update(ctx, device: Optional[Path], aircraft: int, yes: bool):
 
     ac = aircraft_list[aircraft]
 
-    try:
-        device_models = api.list_device_models()
-        model_map = {
-            m["name"].lower(): m["productID"]
-            for m in device_models
-            if m.get("name") and m.get("productID") is not None
-        }
-    except Exception as e:
-        click.echo(f"Warning: could not fetch device models: {e}", err=True)
-        model_map = {}
-
     device_type_map: dict = {}
+    # Use productID directly from the API response if available
     for dev in ac.devices:
-        product_id = model_map.get(dev.name.lower())
-        if product_id is not None:
-            device_type_map[dev.name] = product_id
+        if dev.product_id is not None:
+            device_type_map[dev.name] = dev.product_id
+    # Fall back to /device-models/ name matching for devices without a direct productID
+    unresolved_devs = [dev for dev in ac.devices if dev.name not in device_type_map]
+    if unresolved_devs:
+        try:
+            device_models = api.list_device_models()
+            model_map = {
+                m["name"].lower(): m["productID"]
+                for m in device_models
+                if m.get("name") and m.get("productID") is not None
+            }
+            for dev in unresolved_devs:
+                product_id = model_map.get(dev.name.lower())
+                if product_id is not None:
+                    device_type_map[dev.name] = product_id
+        except Exception as e:
+            click.echo(f"Warning: could not fetch device models: {e}", err=True)
+
+    click.echo(f"Registered devices on {ac.tail_number}:")
+    for dev in ac.devices:
+        pid = device_type_map.get(dev.name)
+        pid_str = f"  db_type=0x{pid:04X}" if pid is not None else "  (product ID unresolved)"
+        click.echo(f"  • {dev.name}{pid_str}")
 
     # --- Collect cards to process ---
     detector = SDCardDetector()
@@ -2577,8 +2612,31 @@ def navdata_update(ctx, device: Optional[Path], aircraft: int, yes: bool):
             None,
         )
         if target_dev is None:
-            click.echo(f"Warning: db_type 0x{target_db_type:04X} matched no registered device for {mount} — skipping.", err=True)
-            continue
+            # device_type_map is built from model_map name matches, which can miss
+            # devices whose name in list_aircraft() differs from list_device_models().
+            # If exactly one registered device couldn't be resolved by name, trust the
+            # card's declared db_type (from feat_unlk.dat) and pair them.
+            unresolved = [d for d in ac.devices if d.name not in device_type_map]
+            if len(unresolved) == 1:
+                target_dev = unresolved[0]
+                device_type_map[target_dev.name] = target_db_type
+                click.echo(
+                    f"  Note: '{target_dev.name}' not found in Garmin device model list "
+                    f"by name — using card's declared db_type 0x{target_db_type:04X}."
+                )
+            else:
+                registered = ", ".join(
+                    f"{d.name} (0x{device_type_map[d.name]:04X})"
+                    for d in ac.devices if d.name in device_type_map
+                ) or "(none resolved)"
+                click.echo(
+                    f"Warning: db_type 0x{target_db_type:04X} on {mount} matched no "
+                    f"registered device for {ac.tail_number}.\n"
+                    f"  Registered devices: {registered}\n"
+                    f"  Create avionics.txt on the card with the device name to override.",
+                    err=True,
+                )
+                continue
 
         # Read installed cycles
         installed_cycles: dict = {}
