@@ -469,8 +469,13 @@ def flight_flysto_auth(ctx, authorization_code: str):
     is_flag=True,
     help='Process files but skip uploads'
 )
+@click.option(
+    '--force',
+    is_flag=True,
+    help='Re-process all files even if already marked as processed.'
+)
 @click.pass_context
-def auto_process(ctx, path: Path, service: tuple, skip_uploads: bool):
+def auto_process(ctx, path: Path, service: tuple, skip_uploads: bool, force: bool):
     """
     Automatically process all flight logs in a directory or SD card.
 
@@ -627,7 +632,7 @@ def auto_process(ctx, path: Path, service: tuple, skip_uploads: bool):
 
         # Check if already processed
         file_hash = hash_file(log_file)
-        if processed_db.is_processed(file_hash):
+        if not force and processed_db.is_processed(file_hash):
             click.echo(f"  ⊙ Already processed (skipped)")
             stats['already_processed'] += 1
             continue
@@ -663,7 +668,7 @@ def auto_process(ctx, path: Path, service: tuple, skip_uploads: bool):
 
             # Check for duplicate flight from another display unit on the same aircraft
             fingerprint = flight_data.flight_fingerprint()
-            if fingerprint and processed_db.is_duplicate_flight(fingerprint):
+            if not force and fingerprint and processed_db.is_duplicate_flight(fingerprint):
                 click.echo(f"  ⊙ Duplicate flight from another display unit (skipped uploads)")
                 stats['already_processed'] += 1
                 processed_db.mark_processed(
