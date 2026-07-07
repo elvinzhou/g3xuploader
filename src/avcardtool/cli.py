@@ -1055,6 +1055,7 @@ def navdata_download(ctx, aircraft: int, device: Optional[int], series: Optional
 
     try:
         from avcardtool.navdata.garmin.api import BatchDatabase
+        from avcardtool.navdata.garmin.feat_unlk import parse_system_id
         api = FlyGarminAPI(auth)
         aircraft_list = api.list_aircraft()
 
@@ -1115,12 +1116,14 @@ def navdata_download(ctx, aircraft: int, device: Optional[int], series: Optional
             # GET the plan — the response includes device serial numbers (used for feat_unlk.dat)
             batch_plan = api.get_batch_update(batch_id)
             batch_system_ids = [
-                int(d["serial"])
-                for d in batch_plan.get("devices", [])
-                if isinstance(d.get("serial"), int)
+                sid for sid in (
+                    parse_system_id(d.get("serial"))
+                    for d in batch_plan.get("devices", [])
+                )
+                if sid is not None
             ]
             if batch_system_ids:
-                click.echo(f"Device serial(s): {batch_system_ids}")
+                click.echo(f"Device serial(s): {[f'0x{s:X}' for s in batch_system_ids]}")
         except Exception as e:
             click.echo(f"Warning: could not create batch session ({e}). Falling back to direct unlock.")
             batch_id = None
@@ -1772,7 +1775,7 @@ def navdata_install(ctx, sd_card: Optional[Path], from_dir: Optional[Path], yes:
     # ---------------------------------------------------------------
     from avcardtool.navdata.garmin.feat_unlk import (
         write_feat_unlk_for_file, vol_id_from_card_serial,
-        get_vol_id_from_sd_card, encode_volume_id,
+        get_vol_id_from_sd_card, encode_volume_id, truncate_system_id,
     )
     from avcardtool.navdata.garmin.taw_parser import _set_hidden as _set_hidden_attr
 
@@ -1788,6 +1791,14 @@ def navdata_install(ctx, sd_card: Optional[Path], from_dir: Optional[Path], yes:
         # Use the first system_id available (typically one device per aircraft)
         system_ids = manifest.get("system_ids", [])
         system_id: int = system_ids[0] if system_ids else 0
+        if system_id:
+            click.echo(f"Avionics System ID: 0x{system_id:X} "
+                       f"→ feat_unlk value 0x{truncate_system_id(system_id):08X}")
+        else:
+            click.echo("\nWarning: no avionics System ID in manifest — feat_unlk.dat "
+                       "will be signed with 0 and the G3X will reject it as "
+                       "'System ID not correct'. Re-run 'navdata download' after "
+                       "updating so the device systemId is captured.", err=True)
 
         feat_unlk_count = 0
         for installed_file in installed_files:
@@ -2060,6 +2071,7 @@ def navdata_auto_update(ctx, device: Optional[Path]):
 
     from avcardtool.navdata.garmin.auth import GarminAuth, GarminAPIError
     from avcardtool.navdata.garmin.api import FlyGarminAPI, BatchDatabase
+    from avcardtool.navdata.garmin.feat_unlk import parse_system_id
     from avcardtool.navdata.garmin.taw_parser import TAWParser
     from avcardtool.navdata.sdcard import SDCardDetector
 
@@ -2276,8 +2288,11 @@ def navdata_auto_update(ctx, device: Optional[Path]):
             batch_id = api.create_batch_update(batch_dbs)
             batch_plan = api.get_batch_update(batch_id)
             batch_system_ids = [
-                int(d["serial"]) for d in batch_plan.get("devices", [])
-                if isinstance(d.get("serial"), int)
+                sid for sid in (
+                    parse_system_id(d.get("serial"))
+                    for d in batch_plan.get("devices", [])
+                )
+                if sid is not None
             ]
         except Exception as e:
             _log.warning(f"  Batch session failed ({e}) — continuing without batch auth")
@@ -2510,6 +2525,7 @@ def navdata_update(ctx, device: Optional[Path], aircraft: int, yes: bool):
     import time as _time
     from avcardtool.navdata.garmin.auth import GarminAuth, GarminAPIError
     from avcardtool.navdata.garmin.api import FlyGarminAPI, BatchDatabase
+    from avcardtool.navdata.garmin.feat_unlk import parse_system_id
     from avcardtool.navdata.garmin.taw_parser import TAWParser
     from avcardtool.navdata.sdcard import SDCardDetector
 
@@ -2870,8 +2886,11 @@ def navdata_update(ctx, device: Optional[Path], aircraft: int, yes: bool):
             batch_id = api.create_batch_update(batch_dbs)
             batch_plan = api.get_batch_update(batch_id)
             batch_system_ids = [
-                int(d["serial"]) for d in batch_plan.get("devices", [])
-                if isinstance(d.get("serial"), int)
+                sid for sid in (
+                    parse_system_id(d.get("serial"))
+                    for d in batch_plan.get("devices", [])
+                )
+                if sid is not None
             ]
             click.echo(f"Batch session: {batch_id}")
         except Exception as e:
