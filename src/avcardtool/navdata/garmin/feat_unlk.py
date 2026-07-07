@@ -143,6 +143,41 @@ def truncate_system_id(system_id: int) -> int:
     return ((system_id & 0xFFFFFFFF) + (system_id >> 32)) & 0xFFFFFFFF
 
 
+def parse_system_id(value) -> Optional[int]:
+    """
+    Convert a Garmin avionics System ID to the raw integer used by feat_unlk.dat.
+
+    Garmin System IDs are **hexadecimal** — the same value the avionics unit
+    reports in its logs (``system_id="60002CA61BD97"`` in a G3X CSV) and that the
+    G3X validates the feat_unlk.dat slot against.  The flyGarmin API returns this
+    identifier as ``device.systemId`` (and the batch-update plan as
+    ``device.serial``), sometimes as a JSON number and sometimes as a string.
+
+    Accepts:
+      * ``int``  → used as-is (already the numeric hardware ID)
+      * ``str``  → parsed as base-16, tolerating an optional ``0x`` prefix
+                   (e.g. ``"60002CA61BD97"`` → ``0x60002CA61BD97``)
+
+    Returns the integer, or ``None`` if the value is empty or unparseable.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):  # bool is an int subclass; never a system ID
+        return None
+    if isinstance(value, int):
+        return value
+    s = str(value).strip()
+    if not s or s == "0":
+        return None
+    if s.lower().startswith("0x"):
+        s = s[2:]
+    try:
+        return int(s, 16)
+    except ValueError:
+        logger.warning(f"parse_system_id: could not parse System ID {value!r} as hex")
+        return None
+
+
 # ---------------------------------------------------------------------------
 # File checksum helpers
 # ---------------------------------------------------------------------------

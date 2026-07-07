@@ -30,6 +30,7 @@ from urllib.parse import urlparse, parse_qs
 import requests
 
 from avcardtool.navdata.garmin.auth import GarminAuth, GarminAPIError, FLYGARMIN_API
+from avcardtool.navdata.garmin.feat_unlk import parse_system_id
 
 logger = logging.getLogger(__name__)
 
@@ -186,7 +187,7 @@ def _parse_device(raw: dict) -> Device:
         device_id=raw.get("id", 0),
         name=raw.get("name", ""),
         system_id=str(raw_sid) if raw_sid is not None else "",
-        system_id_raw=int(raw_sid) if isinstance(raw_sid, int) else None,
+        system_id_raw=parse_system_id(raw_sid),
         display_serial=raw.get("displaySerial", ""),
         avdb_status=raw.get("avdbStatus", ""),
         avdb_types=[_parse_avdb_type(a) for a in raw.get("avdbTypes", [])],
