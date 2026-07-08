@@ -1,12 +1,16 @@
 # AVCardTool — Notifications System Design
 
 **Status: Proposal**
+**Scope decision:** the first (and for now only) delivery backend is
+**email over SMTP** — stdlib-only, no third-party service, no new
+dependencies. The backend interface stays pluggable so push services can
+be added later if ever wanted.
 
 ## 1. Goals
 
 AVCardTool runs unattended on a headless Raspberry Pi. Today the only way to
 know what it did is `journalctl`, which nobody reads until something has
-already gone wrong. This design adds push notifications for the three things
+already gone wrong. This design adds notifications for the three things
 an owner actually cares about:
 
 1. **Flight logs processed** — after an SD card insertion is processed, send a
@@ -23,7 +27,7 @@ an owner actually cares about:
    airplane).
 
 A non-goal: interactive alerting/acknowledgement. This is fire-and-forget
-push, one direction.
+notification, one direction.
 
 ## 2. Current state
 
@@ -86,9 +90,10 @@ sleep loop with a systemd timer (§6).
      │  • fan-out to enabled backends          │
      │  • timeout + retry, never raises        │
      │  • (phase 3) on-disk outbox for offline │
-     └───────┬──────────┬──────────┬───────────┘
-             ▼          ▼          ▼
-          ntfy      webhook     email    (pushover, telegram, …)
+     └────────────────────┬────────────────────┘
+                          ▼
+                    email (SMTP)
+          (future: ntfy, webhook, pushover, …)
 ```
 
 Module layout mirrors the existing uploader pattern
@@ -97,19 +102,21 @@ extend:
 
 ```
 src/avcardtool/notifications/
-├── __init__.py        # BACKENDS registry: {"ntfy": NtfyBackend, ...}
+├── __init__.py        # BACKENDS registry: {"email": EmailBackend}
 ├── base.py            # NotificationEvent, NotificationResult, NotificationBackend ABC
 ├── manager.py         # NotificationManager
 └── backends/
-    ├── ntfy.py        # recommended default
-    ├── webhook.py     # generic JSON POST (Slack/Discord/Home Assistant/anything)
-    ├── email_smtp.py  # stdlib smtplib, no new deps
-    ├── pushover.py
-    └── telegram.py
+    └── email_smtp.py  # stdlib smtplib/ssl — the only backend for now
 ```
 
-No new runtime dependencies: every backend is implementable with `requests`
-(already a dependency) or stdlib `smtplib`/`ssl`.
+Even with a single backend, the manager/ABC split earns its keep: event
+construction, filtering, retry, and rate-limiting live in the manager and
+are tested once; adding a future backend (ntfy, generic webhook, Pushover,
+Telegram) is one file plus a registry entry, with no changes to the call
+sites in `cli.py`.
+
+No new runtime dependencies: the email backend is pure stdlib
+(`smtplib`, `ssl`, `email.message`).
 
 ## 4. Core types
 
@@ -125,9 +132,9 @@ class Severity(str, Enum):
 class NotificationEvent:
     event_type: str          # "flights_processed" | "navdata_updated" | ...
     severity: Severity
-    title: str               # short, push-notification friendly
+    title: str               # short; becomes the email subject
     body: str                # multi-line human text (see §7 examples)
-    data: Dict[str, Any]     # full structured payload for webhook consumers
+    data: Dict[str, Any]     # full structured payload (JSON attachment, §5)
     timestamp: str           # ISO-8601, local time
 
 @dataclass
@@ -153,10 +160,11 @@ class NotificationBackend(ABC):
 | `garmin_auth_expired` | ERROR | `navdata_auto_update()` auth guard | `ensure_authenticated()` returned False. Body includes the fix: `avcardtool navdata login`. Rate-limited to once per 24h via a state file (`<data_dir>/notifications/state.json`) so the daily timer doesn't nag daily forever. |
 | `processing_error` | ERROR | `auto_process()` | Unhandled per-run failure (e.g. mount error, zero uploaders configured but uploads expected). Per-file parse errors stay in the `flights_processed` body instead. |
 
-Severity is mapped to backend-native priority where the backend supports it
-(ntfy `Priority:`, Pushover `priority`, email subject prefix). ERROR events
-should reach the phone even in OS do-not-disturb tiers where the service
-supports it (ntfy `high`, Pushover `1`).
+Severity is surfaced in the email subject prefix — `[AVCardTool]` for INFO,
+`[AVCardTool WARNING]`, `[AVCardTool ERROR]` — so a simple inbox filter can
+route ERROR mail to a high-visibility folder or trigger a phone alert via
+the mail app. (If push backends are added later, severity maps to their
+native priority fields instead.)
 
 ## 5. Configuration
 
@@ -176,39 +184,45 @@ New top-level `notifications` section in `config.json`, with a
     "processing_error": true
   },
   "backends": {
-    "ntfy": {
-      "enabled": true,
-      "server": "https://ntfy.sh",
-      "topic": "avcardtool-n12345-x7k2",
-      "token": ""
-    },
-    "webhook": {
-      "enabled": false,
-      "url": "https://hooks.example.com/...",
-      "headers": {}
-    },
     "email": {
-      "enabled": false,
-      "smtp_host": "smtp.gmail.com", "smtp_port": 587, "use_tls": true,
-      "username": "", "password": "", "from_addr": "", "to_addrs": []
-    },
-    "pushover": { "enabled": false, "user_key": "", "app_token": "" },
-    "telegram": { "enabled": false, "bot_token": "", "chat_id": "" }
+      "enabled": true,
+      "smtp_host": "smtp.gmail.com",
+      "smtp_port": 587,
+      "use_tls": true,
+      "username": "you@gmail.com",
+      "password": "abcd efgh ijkl mnop",
+      "from_addr": "you@gmail.com",
+      "to_addrs": ["you@gmail.com"]
+    }
   }
 }
 ```
 
-**ntfy is the recommended default** for the setup wizard: no account, no API
-key, free, self-hostable, instant phone push via the ntfy app. The wizard
-generates a random unguessable topic name (`avcardtool-<tail>-<6 random
-chars>`) and prints the subscribe instructions. Privacy note for the docs:
-payloads include tail number and engine times; users who care should
-self-host ntfy or use email/webhook — and the wizard should say so.
+`backends` stays a per-backend dict (like `uploaders`) so future backends
+slot in without schema churn.
+
+Email backend behavior:
+
+- `use_tls: true` → STARTTLS on port 587 (the common case);
+  `smtp_port: 465` with `use_tls: true` → implicit TLS (`SMTP_SSL`).
+  Plaintext SMTP is allowed only for `localhost` relays.
+- Multipart message: plain-text body (§7 examples) plus a
+  `application/json` attachment of the structured `data` payload for
+  anything downstream that wants to parse it. (Alternatively text-only to
+  start — see open question 3.)
+- **Gmail caveat for the docs/wizard:** accounts with 2FA need an
+  App Password (regular passwords are rejected); the wizard should link to
+  the Google help page. Any SMTP provider works — Gmail is just the
+  worked example.
+- Credentials live in `config.json` in plaintext. This matches the existing
+  precedent (CloudAhoy tokens, FlySto client secrets already live there),
+  so no new storage mechanism is introduced — but see open question 1.
 
 Setup wizard gets a fourth section ("Notifications") in `setup_wizard()`,
-opt-in like the others, asking: enable? → which backend (ntfy default) →
-backend credentials → send test notification now (calls
-`avcardtool notify-test`, see below).
+opt-in like the others: enable? → SMTP host/port/TLS (defaults preloaded
+for Gmail) → username/password → from/to addresses → offer to send a test
+email immediately (calls the same path as `avcardtool notify-test`, see
+below).
 
 New CLI helper: `avcardtool notify-test` sends a synthetic event through the
 full manager so users can verify delivery end-to-end after setup.
@@ -216,14 +230,15 @@ full manager so users can verify delivery end-to-end after setup.
 ## 6. Delivery semantics
 
 `NotificationManager.notify(event)` must **never break the pipeline that
-called it** — a down ntfy server cannot be the reason flight logs didn't
-upload or a card didn't get its cycle:
+called it** — an unreachable SMTP server cannot be the reason flight logs
+didn't upload or a card didn't get its cycle:
 
-- Every backend call wrapped, 10 s timeout, 3 attempts with 2 s/4 s backoff.
+- Every backend call wrapped, 10 s socket timeout on SMTP connect/send,
+  3 attempts with 2 s/4 s backoff.
 - All exceptions logged (`logger.warning`) and swallowed; results returned
   for the caller's journal line.
-- Backends are called sequentially (n ≤ 5, each ≤ ~30 s worst case; the
-  systemd units already allow 600–1800 s).
+- Worst case added latency is ~40 s per event, well inside the systemd
+  units' existing 600–1800 s budgets.
 - **Phase 3, offline outbox:** the Pi may be in a hangar with flaky LTE.
   Failed events are spooled as JSON to `<data_dir>/notifications/outbox/`
   and a drain is attempted at the start of every subsequent
@@ -254,8 +269,9 @@ Skipped: 14 already processed, 1 non-flight (ground run)
 
 The `data` dict carries the machine-readable version (per-flight OOOI ISO
 timestamps, ending hours, per-service booleans + URLs from
-`upload_results`) so a webhook consumer (e.g. Home Assistant) can do more
-than display text. If the non-flight override adjusted the ending hours
+`upload_results`), available today as the optional JSON attachment and
+ready for any future backend that wants structure over prose (e.g. a Home
+Assistant webhook). If the non-flight override adjusted the ending hours
 (`override_meta`), the body says so — that's exactly the "final times" the
 user wants to trust.
 
@@ -345,42 +361,46 @@ The timer's `OnCalendar` is user-editable via a systemd drop-in for anyone
 who wants more or less.
 
 With §7.2/7.3 in place, this loop is finally observable: the card quietly
-kept itself current → the user gets the "card is ready" push; the loop is
-broken (auth, network, Garmin API change) → the user gets an ERROR push
+kept itself current → the user gets the "card is ready" email; the loop is
+broken (auth, network, Garmin API change) → the user gets an ERROR email
 instead of finding out in the run-up.
 
 ## 9. Implementation plan
 
-**Phase 1 — core + the two headline notifications**
-1. `notifications/` package: base types, manager, `ntfy` + `webhook` backends.
+**Phase 1 — core + email + the two headline notifications**
+1. `notifications/` package: base types, manager, `email` backend
+   (stdlib `smtplib`).
 2. `NotificationsConfig` in `core/config.py` (+ `to_dict`/`load`/`validate`).
 3. Emit `flights_processed` from `auto_process()`; `navdata_updated`,
    `navdata_update_failed`, `garmin_auth_expired` from `navdata_auto_update()`.
 4. `avcardtool notify-test` command.
-5. Unit tests: manager filtering/retry/never-raises (mock `requests`),
-   backend payload formatting, event rendering from a canned `stats` dict
-   and plan list.
+5. Unit tests: manager filtering/retry/never-raises and email payload
+   formatting (mock `smtplib.SMTP`), event rendering from a canned `stats`
+   dict and plan list.
 
 **Phase 2 — timer migration + setup UX**
 1. Add `avcardtool-navdata-check.{service,timer}`; update udev rule;
    `install.sh` migration (remove watch units, enable timer).
 2. Setup wizard "Notifications" section; README/ARCHITECTURE updates.
-3. `email` backend (stdlib smtplib).
 
-**Phase 3 — robustness + long tail**
+**Phase 3 — robustness + long tail (only as demand appears)**
 1. Offline outbox with drain-on-next-run (§6).
-2. `pushover`, `telegram` backends.
-3. Optional extras if wanted later: per-backend `min_severity`, weekly
-   "still alive, all current" heartbeat (default off).
+2. Additional backends (ntfy, generic webhook, Pushover, Telegram) — one
+   file + registry entry each, per §3.
+3. Optional extras: per-backend `min_severity`, weekly "still alive, all
+   current" heartbeat (default off).
 
 ## 10. Open questions
 
-1. **ntfy topic = shared-secret** — is the wizard-generated random topic on
-   ntfy.sh acceptable as the default, or should the wizard push harder
-   toward self-hosting/auth tokens for anyone uneasy about tail numbers and
-   engine times transiting a public relay?
+1. **SMTP credential storage** — the password sits in `config.json` in
+   plaintext, consistent with the existing uploader credentials. Fine for
+   now, or worth a follow-up that moves all secrets to a chmod-600 file
+   under `<data_dir>` (like `garmin_tokens.json` already is)?
 2. **Upload-failure severity** — a run where flights uploaded to 2 of 3
    services currently maps to `flights_processed` at WARNING. Should a
    *total* upload failure (0 of N) escalate to its own ERROR event instead?
-3. **Check cadence** — is daily at 03:00 right, or should the default be
+3. **Email format** — plain text only, or text + attached JSON payload
+   (§5)? Text-only is simpler and reads better on phones; the attachment
+   only matters if something ever machine-parses the mail.
+4. **Check cadence** — is daily at 03:00 right, or should the default be
    twice daily given the pre-download branch already provides slack?
