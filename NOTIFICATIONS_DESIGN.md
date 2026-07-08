@@ -1,10 +1,12 @@
 # AVCardTool — Notifications System Design
 
-**Status: Proposal**
+**Status: Phase 1 implemented** (notifications package, email backend,
+event wiring in both auto flows, `notify-test`). Phases 2–3 remain
+proposals.
 **Scope decision:** the first (and for now only) delivery backend is
 **email over SMTP** — stdlib-only, no third-party service, no new
 dependencies. The backend interface stays pluggable so push services can
-be added later if ever wanted.
+be added later if ever wanted. Emails are plain text only.
 
 ## 1. Goals
 
@@ -102,10 +104,12 @@ extend:
 
 ```
 src/avcardtool/notifications/
-├── __init__.py        # BACKENDS registry: {"email": EmailBackend}
+├── __init__.py        # re-exports; BACKENDS registry lives in backends/
 ├── base.py            # NotificationEvent, NotificationResult, NotificationBackend ABC
 ├── manager.py         # NotificationManager
+├── events.py          # pure builder functions: pipeline data → NotificationEvent
 └── backends/
+    ├── __init__.py    # BACKENDS registry: {"email": EmailBackend}
     └── email_smtp.py  # stdlib smtplib/ssl — the only backend for now
 ```
 
@@ -206,10 +210,11 @@ Email backend behavior:
 - `use_tls: true` → STARTTLS on port 587 (the common case);
   `smtp_port: 465` with `use_tls: true` → implicit TLS (`SMTP_SSL`).
   Plaintext SMTP is allowed only for `localhost` relays.
-- Multipart message: plain-text body (§7 examples) plus a
-  `application/json` attachment of the structured `data` payload for
-  anything downstream that wants to parse it. (Alternatively text-only to
-  start — see open question 3.)
+- Plain-text body only (§7 examples). A structured `application/json`
+  attachment was considered and deferred: nothing machine-parses the mail
+  today, and text-only reads better on phones. The structured payload
+  still exists on every event (`NotificationEvent.data`) for any future
+  backend that wants it.
 - **Gmail caveat for the docs/wizard:** accounts with 2FA need an
   App Password (regular passwords are rejected); the wizard should link to
   the Google help page. Any SMTP provider works — Gmail is just the
@@ -269,9 +274,9 @@ Skipped: 14 already processed, 1 non-flight (ground run)
 
 The `data` dict carries the machine-readable version (per-flight OOOI ISO
 timestamps, ending hours, per-service booleans + URLs from
-`upload_results`), available today as the optional JSON attachment and
-ready for any future backend that wants structure over prose (e.g. a Home
-Assistant webhook). If the non-flight override adjusted the ending hours
+`upload_results`), ready for any future backend that wants structure over
+prose (e.g. a Home Assistant webhook); the plain-text email renders it as
+shown. If the non-flight override adjusted the ending hours
 (`override_meta`), the body says so — that's exactly the "final times" the
 user wants to trust.
 
@@ -399,8 +404,5 @@ instead of finding out in the run-up.
 2. **Upload-failure severity** — a run where flights uploaded to 2 of 3
    services currently maps to `flights_processed` at WARNING. Should a
    *total* upload failure (0 of N) escalate to its own ERROR event instead?
-3. **Email format** — plain text only, or text + attached JSON payload
-   (§5)? Text-only is simpler and reads better on phones; the attachment
-   only matters if something ever machine-parses the mail.
-4. **Check cadence** — is daily at 03:00 right, or should the default be
+3. **Check cadence** — is daily at 03:00 right, or should the default be
    twice daily given the pre-download branch already provides slack?

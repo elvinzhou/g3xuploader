@@ -99,6 +99,17 @@ def cli(ctx, config: Optional[Path], verbose: bool):
     )
 
 
+def _notification_manager(cfg):
+    """Build a NotificationManager, or None when notifications are off/unconfigured."""
+    try:
+        from avcardtool.notifications import NotificationManager
+        manager = NotificationManager.from_config(cfg)
+        return manager if manager.active else None
+    except Exception as e:
+        logger.warning(f"Notifications unavailable: {e}")
+        return None
+
+
 # ============================================================================
 # Flight Data Command Group
 # ============================================================================
@@ -504,6 +515,12 @@ def auto_process(ctx, path: Path, service: tuple, skip_uploads: bool, force: boo
             path = resolve_device_mount_point(path, readonly=True)
         except RuntimeError as e:
             click.echo(f"Error: {e}", err=True)
+            manager = _notification_manager(cfg)
+            if manager:
+                from avcardtool.notifications.events import build_processing_error_event
+                manager.notify(build_processing_error_event(
+                    f"Could not mount SD card {path}: {e}"
+                ))
             sys.exit(1)
     else:
         path = path.resolve()
@@ -627,6 +644,12 @@ def auto_process(ctx, path: Path, service: tuple, skip_uploads: bool, force: boo
         'upload_failed': 0
     }
 
+    # Collected for the end-of-run notification (see NOTIFICATIONS_DESIGN.md)
+    from avcardtool.notifications.events import flight_entry_from_summary
+    notified_flights: list = []
+    notify_notes: list = []
+    parse_errors: list = []
+
     for log_file in log_files:
         click.echo(f"Processing: {log_file.name}")
 
@@ -693,6 +716,13 @@ def auto_process(ctx, path: Path, service: tuple, skip_uploads: bool, force: boo
                     True,
                     flight_fingerprint=fingerprint
                 )
+                notified_flights.append(flight_entry_from_summary(log_file.name, {
+                    'aircraft_ident': analysis.aircraft_ident,
+                    'hobbs': {'increment_hours': analysis.hobbs.increment_hours,
+                              'ending_hours': analysis.hobbs.ending_hours} if analysis.hobbs else None,
+                    'tach': {'increment_hours': analysis.tach.increment_hours,
+                             'ending_hours': analysis.tach.ending_hours} if analysis.tach else None,
+                }))
                 continue
 
             pending_uploads.append((file_hash, log_file, flight_data, analysis, fingerprint))
@@ -700,6 +730,7 @@ def auto_process(ctx, path: Path, service: tuple, skip_uploads: bool, force: boo
         except Exception as e:
             logger.exception(f"Error processing {log_file}")
             click.echo(f"  ✗ Error: {e}", err=True)
+            parse_errors.append(f"{log_file.name}: {e}")
 
     # Build analysis summaries and apply the non-flight override where applicable.
     #
@@ -723,6 +754,10 @@ def auto_process(ctx, path: Path, service: tuple, skip_uploads: bool, force: boo
                         f"{old_hobbs:.2f}h → {new_hobbs:.2f}h "
                         f"(authoritative value from {override_meta['file']})"
                     )
+                    notify_notes.append(
+                        f"Hobbs ending adjusted {old_hobbs:.2f}h → {new_hobbs:.2f}h "
+                        f"(authoritative value from {override_meta['file']})"
+                    )
 
                 new_tach = override_meta['engine_hours']
                 old_tach = (summary.get('tach') or {}).get('ending_hours')
@@ -732,6 +767,10 @@ def auto_process(ctx, path: Path, service: tuple, skip_uploads: bool, force: boo
                     click.echo(
                         f"  {lf.name}: Tach ending adjusted "
                         f"{old_tach:.2f}h → {new_tach:.2f}h "
+                        f"(authoritative value from {override_meta['file']})"
+                    )
+                    notify_notes.append(
+                        f"Tach ending adjusted {old_tach:.2f}h → {new_tach:.2f}h "
                         f"(authoritative value from {override_meta['file']})"
                     )
 
@@ -784,6 +823,10 @@ def auto_process(ctx, path: Path, service: tuple, skip_uploads: bool, force: boo
             flight_fingerprint=fingerprint
         )
 
+        notified_flights.append(
+            flight_entry_from_summary(log_file.name, analysis_summary, upload_results)
+        )
+
     # Carryd: submit once using the flight with the latest avionics-recorded
     # timestamp across all pending flights.  Using the avionics date (from
     # OOOI data inside the file) rather than the filename timestamp means
@@ -811,6 +854,10 @@ def auto_process(ctx, path: Path, service: tuple, skip_uploads: bool, force: boo
                 f"\n  Carryd: skipping — flight at {candidate_ts} is not newer "
                 f"than last submission ({last_submitted_ts})"
             )
+            notify_notes.append(
+                f"Carryd: skipped — flight at {candidate_ts} is not newer "
+                f"than last submission ({last_submitted_ts})"
+            )
         else:
             uploader_cfg = cfg.flight_data.uploaders.get('carryd')
             if uploader_cfg and uploader_cfg.enabled and 'carryd' in UPLOADERS:
@@ -823,6 +870,7 @@ def auto_process(ctx, path: Path, service: tuple, skip_uploads: bool, force: boo
                 if result.success:
                     click.echo(f"\n  Carryd: ✓ {result.message}")
                     stats['upload_success'] += 1
+                    notify_notes.append(f"Carryd: ✓ {result.message}")
                     if candidate_ts:
                         carryd_state['last_submitted_at'] = candidate_ts
                         try:
@@ -832,6 +880,7 @@ def auto_process(ctx, path: Path, service: tuple, skip_uploads: bool, force: boo
                 else:
                     click.echo(f"\n  Carryd: ✗ {result.message}")
                     stats['upload_failed'] += 1
+                    notify_notes.append(f"Carryd: ✗ {result.message}")
 
     # When no flights were found but a non-flight file provided authoritative
     # times, we can still keep Carryd in sync using those values directly.
@@ -899,6 +948,20 @@ def auto_process(ctx, path: Path, service: tuple, skip_uploads: bool, force: boo
         click.echo(f"Uploads successful: {stats['upload_success']}")
         click.echo(f"Uploads failed: {stats['upload_failed']}")
     click.echo(f"{'='*60}\n")
+
+    # Notify — only when this run actually handled something new; a card
+    # re-insert where every file was already processed stays silent.
+    if stats['flights'] or stats['non_flights'] or parse_errors:
+        manager = _notification_manager(cfg)
+        if manager:
+            from avcardtool.notifications.events import build_flights_processed_event
+            manager.notify(build_flights_processed_event(
+                stats,
+                notified_flights,
+                notes=notify_notes,
+                errors=parse_errors,
+                uploads_skipped=skip_uploads or not upload_services,
+            ))
 
 
 # ============================================================================
@@ -2074,6 +2137,13 @@ def navdata_auto_update(ctx, device: Optional[Path]):
     from avcardtool.navdata.garmin.feat_unlk import parse_system_id
     from avcardtool.navdata.garmin.taw_parser import TAWParser
     from avcardtool.navdata.sdcard import SDCardDetector
+    from avcardtool.notifications.events import (
+        build_garmin_auth_expired_event,
+        build_navdata_update_failed_event,
+        build_navdata_updated_event,
+    )
+
+    notify_manager = _notification_manager(cfg)
 
     # ---------------------------------------------------------------
     # Authenticate
@@ -2084,6 +2154,10 @@ def navdata_auto_update(ctx, device: Optional[Path]):
             _log.error("Garmin access token expired. Re-run 'avcardtool navdata login' to re-authenticate.")
         else:
             _log.error("Not authenticated. Run 'avcardtool navdata login' first.")
+        # The daily re-check would otherwise fail silently forever; the
+        # manager rate-limits this event to one notification per 24h.
+        if notify_manager:
+            notify_manager.notify(build_garmin_auth_expired_event())
         sys.exit(1)
 
     api = FlyGarminAPI(auth)
@@ -2233,7 +2307,8 @@ def navdata_auto_update(ctx, device: Optional[Path]):
         # subscribed to.  Without this guard we would attempt to download and
         # unlock databases the user has never purchased (e.g. Basemap on a GTN),
         # resulting in 403 unlock errors and wasted downloads.
-        plan = []  # [(avdb, series, issue)]
+        plan = []  # [(avdb, series, issue, old_issue, is_upcoming)]
+        already_current = []  # [{"database", "issue"}] for the notification
         for avdb in target_dev.avdb_types:
             installed_issue = installed_cycles.get(avdb.name, {}).get("issue")
             for s in avdb.series:
@@ -2248,13 +2323,15 @@ def navdata_auto_update(ctx, device: Optional[Path]):
                     current = s.installable_issues[0]
                     if current.name != installed_issue:
                         _log.info(f"  {avdb.name}: need current {current.name} (have {installed_issue or 'none'})")
-                        plan.append((avdb, s, current))
+                        plan.append((avdb, s, current, installed_issue, False))
+                    else:
+                        already_current.append({"database": avdb.name, "issue": current.name})
 
                 for issue in s.available_issues:
                     if issue.name not in installable_names:
                         if issue.name != installed_issue:
                             _log.info(f"  {avdb.name}: pre-downloading next cycle {issue.name}")
-                            plan.append((avdb, s, issue))
+                            plan.append((avdb, s, issue, installed_issue, True))
                         break  # only the earliest upcoming cycle
 
         if not plan:
@@ -2283,7 +2360,7 @@ def navdata_auto_update(ctx, device: Optional[Path]):
         try:
             batch_dbs = [
                 BatchDatabase(series_id=s.series_id, issue_name=issue.name, device_ids=[target_dev.device_id])
-                for _, s, issue in plan
+                for _, s, issue, _, _ in plan
             ]
             batch_id = api.create_batch_update(batch_dbs)
             batch_plan = api.get_batch_update(batch_id)
@@ -2298,9 +2375,18 @@ def navdata_auto_update(ctx, device: Optional[Path]):
             _log.warning(f"  Batch session failed ({e}) — continuing without batch auth")
 
         manifest_entries = []
+        # (avdb name, issue name) → cycle-transition info for the notification
+        plan_info = {
+            (avdb.name, issue.name): {
+                "old_issue": old_issue,
+                "upcoming": is_upcoming,
+                "effective_at": issue.effective_at,
+            }
+            for avdb, s, issue, old_issue, is_upcoming in plan
+        }
         import time as _time
 
-        for avdb, s, issue in plan:
+        for avdb, s, issue, old_issue, is_upcoming in plan:
             # Include series_id in the cache key so that different avionics
             # families that share the same avdb name and cycle (e.g. GTN series
             # 2230 vs G3X series 2239 both named "Navigation Data/2603") get
@@ -2456,17 +2542,46 @@ def navdata_auto_update(ctx, device: Optional[Path]):
             }, f, indent=2)
 
         _log.info(f"  Installing to {mount}...")
+        install_ok = True
         try:
             ctx.invoke(navdata_install, sd_card=mount, from_dir=card_dir, yes=True)
         except SystemExit as e:
             if e.code != 0:
+                install_ok = False
                 msg = f"Install failed for card at {mount} (exit {e.code})"
                 _log.error(f"  {msg}")
                 issues.append(("ERROR", msg))
         except Exception as e:
+            install_ok = False
             msg = f"Install raised for card at {mount}: {e}"
             _log.error(f"  {msg}")
             issues.append(("ERROR", msg))
+
+        if install_ok and notify_manager:
+            # One entry per unique database/cycle actually staged for this card
+            installed_dbs = []
+            seen_installs: set = set()
+            for entry in manifest_entries:
+                key = (entry["avdb_type"], entry["issue_name"])
+                if key in seen_installs:
+                    continue
+                seen_installs.add(key)
+                info = plan_info.get(key, {})
+                installed_dbs.append({
+                    "database": entry["avdb_type"],
+                    "old_issue": info.get("old_issue"),
+                    "new_issue": entry["issue_name"],
+                    "effective_at": info.get("effective_at"),
+                    "upcoming": info.get("upcoming", False),
+                })
+            notify_manager.notify(build_navdata_updated_event(
+                card_serial=card_serial,
+                avionics=target_dev.name,
+                aircraft=ac.tail_number,
+                installed=installed_dbs,
+                already_current=already_current,
+                file_count=len(manifest_entries),
+            ))
 
     # ---------------------------------------------------------------
     # End-of-run summary
@@ -2477,6 +2592,10 @@ def navdata_auto_update(ctx, device: Optional[Path]):
         for severity, msg in issues:
             _log.error("  [%s] %s", severity, msg)
         _log.error("=" * 60)
+        # WARNINGs alone don't warrant an alert; they ride along when an
+        # ERROR fires the event.
+        if notify_manager and any(sev == "ERROR" for sev, _ in issues):
+            notify_manager.notify(build_navdata_update_failed_event(issues))
     else:
         _log.info("Navdata update completed successfully.")
 
@@ -3532,6 +3651,67 @@ def config_migrate(ctx, legacy_config: Path, output_file: Optional[Path]):
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
+
+
+# ============================================================================
+# Notifications
+# ============================================================================
+
+@cli.command('notify-test')
+@click.pass_context
+def notify_test(ctx):
+    """
+    Send a test notification through all configured backends.
+
+    Verifies notification delivery end-to-end (config → manager → SMTP)
+    without waiting for an SD card insertion.
+    """
+    import socket
+
+    from avcardtool.notifications import NotificationManager
+    from avcardtool.notifications.base import NotificationEvent, Severity
+
+    cfg = ctx.obj['config']
+    manager = NotificationManager.from_config(cfg)
+
+    if not manager.config.enabled:
+        click.echo("Notifications are disabled (notifications.enabled = false).", err=True)
+        click.echo("Enable them in your config file and re-run.", err=True)
+        sys.exit(1)
+    if not manager.backends:
+        click.echo("No notification backends are enabled.", err=True)
+        click.echo("Configure notifications.backends.email in your config file.", err=True)
+        sys.exit(1)
+
+    # Surface configuration problems before attempting delivery
+    problems = []
+    for backend in manager.backends:
+        problems.extend(backend.validate_config())
+    if problems:
+        click.echo("Configuration problems:")
+        for problem in problems:
+            click.echo(f"  ✗ {problem}")
+        sys.exit(1)
+
+    event = NotificationEvent(
+        event_type="test",
+        severity=Severity.INFO,
+        title="Test notification",
+        body=(
+            f"This is a test notification from avcardtool {__version__} "
+            f"on {socket.gethostname()}.\n"
+            "If you can read this, notification delivery is working."
+        ),
+    )
+
+    click.echo("Sending test notification...")
+    results = manager.notify(event, force=True)
+    all_ok = bool(results)
+    for result in results:
+        mark = '✓' if result.success else '✗'
+        click.echo(f"  {mark} {result.backend}: {result.message}")
+        all_ok = all_ok and result.success
+    sys.exit(0 if all_ok else 1)
 
 
 # ============================================================================
