@@ -1,23 +1,26 @@
 # udev rules for automatic aviation SD card processing
 #
-# When a FAT32-formatted SD card is inserted, three systemd services fire:
+# When a FAT32-formatted SD card is inserted, two systemd services fire:
 #   avcardtool-processor@<dev>       — flight log analysis and upload (one-shot)
 #   avcardtool-navdata@<dev>         — navigation database update on insert (one-shot)
-#   avcardtool-navdata-watch@<dev>   — periodic re-check every 24h while card stays inserted
 #
-# The watch service starts after the initial navdata update and loops until the
-# card is removed, ensuring long-inserted cards receive new AIRAC cycles automatically.
+# Cards that stay inserted are kept current by the system-wide
+# avcardtool-navdata-check.timer (daily at ~03:00, Persistent=true), which
+# runs 'avcardtool navdata auto-update' across all mounted cards — no
+# per-device unit is needed for the periodic re-check.
 #
 # Installation:
 #   sudo cp 99-avcardtool-sdcard.rules /etc/udev/rules.d/
-#   sudo cp avcardtool-processor@.service      /etc/systemd/system/
-#   sudo cp avcardtool-navdata@.service        /etc/systemd/system/
-#   sudo cp avcardtool-navdata-watch@.service  /etc/systemd/system/
+#   sudo cp avcardtool-processor@.service       /etc/systemd/system/
+#   sudo cp avcardtool-navdata@.service         /etc/systemd/system/
+#   sudo cp avcardtool-navdata-check.service    /etc/systemd/system/
+#   sudo cp avcardtool-navdata-check.timer      /etc/systemd/system/
 #   sudo udevadm control --reload-rules
 #   sudo systemctl daemon-reload
+#   sudo systemctl enable --now avcardtool-navdata-check.timer
 #
 # Monitoring:
-#   journalctl -u "avcardtool-*@*" -f
+#   journalctl -u "avcardtool-*" -f
 
 # sdX partitions (USB card readers, most external adapters)
 ACTION=="add", \
@@ -25,7 +28,7 @@ ACTION=="add", \
   SUBSYSTEM=="block", \
   ENV{ID_FS_TYPE}=="vfat", \
   TAG+="systemd", \
-  ENV{SYSTEMD_WANTS}="avcardtool-processor@%k.service avcardtool-navdata@%k.service avcardtool-navdata-watch@%k.service"
+  ENV{SYSTEMD_WANTS}="avcardtool-processor@%k.service avcardtool-navdata@%k.service"
 
 # mmcblkXpY partitions (built-in SD card readers)
 ACTION=="add", \
@@ -33,4 +36,4 @@ ACTION=="add", \
   SUBSYSTEM=="block", \
   ENV{ID_FS_TYPE}=="vfat", \
   TAG+="systemd", \
-  ENV{SYSTEMD_WANTS}="avcardtool-processor@%k.service avcardtool-navdata@%k.service avcardtool-navdata-watch@%k.service"
+  ENV{SYSTEMD_WANTS}="avcardtool-processor@%k.service avcardtool-navdata@%k.service"

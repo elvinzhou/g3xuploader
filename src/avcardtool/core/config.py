@@ -88,6 +88,20 @@ class NavdataConfig:
 
 
 @dataclass
+class NotificationsConfig:
+    """Notification delivery configuration (see NOTIFICATIONS_DESIGN.md)"""
+    enabled: bool = False
+    events: Dict[str, bool] = field(default_factory=lambda: {
+        "flights_processed": True,
+        "navdata_updated": True,
+        "navdata_update_failed": True,
+        "garmin_auth_expired": True,
+        "processing_error": True,
+    })
+    backends: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+
+
+@dataclass
 class SystemConfig:
     """System-level configuration"""
     data_dir: str = field(default_factory=lambda: str(Path.home() / ".local" / "share" / "avcardtool"))
@@ -137,6 +151,7 @@ class Config:
         self.config_path = config_path or self._find_config()
         self.flight_data = FlightDataConfig()
         self.navdata = NavdataConfig()
+        self.notifications = NotificationsConfig()
         self.system = SystemConfig()
 
         if self.config_path and self.config_path.exists():
@@ -207,6 +222,15 @@ class Config:
             self.navdata.auto_download = nd.get("auto_download", False)
             self.navdata.garmin = nd.get("garmin", {})
 
+        # Load notifications config
+        if "notifications" in data:
+            nc = data["notifications"]
+            self.notifications.enabled = nc.get("enabled", False)
+            if "events" in nc:
+                self.notifications.events.update(nc["events"])
+            if "backends" in nc:
+                self.notifications.backends = nc["backends"]
+
         # Load system config
         if "system" in data:
             sys = data["system"]
@@ -260,6 +284,7 @@ class Config:
                 "auto_download": self.navdata.auto_download,
                 "garmin": self.navdata.garmin
             },
+            "notifications": asdict(self.notifications),
             "system": asdict(self.system)
         }
 
@@ -329,6 +354,21 @@ class Config:
         if not data_dir.parent.exists():
             raise ValueError(f"Parent directory does not exist: {data_dir.parent}")
 
+        # Validate enabled notification backends
+        if self.notifications.enabled:
+            from avcardtool.notifications import BACKENDS
+            problems = []
+            for name, backend_cfg in self.notifications.backends.items():
+                if not isinstance(backend_cfg, dict) or not backend_cfg.get("enabled"):
+                    continue
+                backend_cls = BACKENDS.get(name)
+                if backend_cls is None:
+                    problems.append(f"unknown notification backend: {name}")
+                    continue
+                problems.extend(backend_cls(backend_cfg).validate_config())
+            if problems:
+                raise ValueError("; ".join(problems))
+
         return True
 
     @classmethod
@@ -346,6 +386,7 @@ class Config:
         config.config_path = path
         config.flight_data = FlightDataConfig()
         config.navdata = NavdataConfig()
+        config.notifications = NotificationsConfig()
         config.system = SystemConfig()  # always fresh defaults, never inherits a stale config
 
         # Enable debug by default for initial setup/debugging
@@ -384,6 +425,19 @@ class Config:
         config.navdata.garmin = {
             "email": "your-flygarmin-email@example.com",
             "databases": ["navdata", "terrain", "obstacles"]
+        }
+
+        config.notifications.backends = {
+            "email": {
+                "enabled": False,
+                "smtp_host": "smtp.gmail.com",
+                "smtp_port": 587,
+                "use_tls": True,
+                "username": "your-email@example.com",
+                "password": "your-app-password",
+                "from_addr": "your-email@example.com",
+                "to_addrs": ["your-email@example.com"]
+            }
         }
 
         config.save(path)
