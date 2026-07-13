@@ -25,13 +25,17 @@ avcardtool/
 │   │   ├── analyzers/         # Hobbs, Tach, OOOI, flight detection
 │   │   ├── processors/        # Garmin G3X CSV processor
 │   │   └── uploaders/         # CloudAhoy, FlySto, SavvyAviation, etc.
+│   ├── notifications/         # Event delivery (see NOTIFICATIONS_DESIGN.md)
+│   │   ├── manager.py         # fan-out, retry, rate limiting; never raises
+│   │   ├── events.py          # pipeline results → NotificationEvent
+│   │   └── backends/          # email (SMTP); registry is pluggable
 │   └── navdata/
 │       └── garmin/
 │           ├── auth.py        # SSO + OAuth login flow
 │           ├── api.py         # flyGarmin REST API client
 │           ├── taw_parser.py  # TAW archive extraction
 │           └── sdcard.py      # SD card detection and writing
-├── systemd/                   # udev rules + systemd service template
+├── systemd/                   # udev rules + systemd units (services, timers)
 ├── install.sh                 # Install/upgrade script
 ├── package_deb.sh             # .deb packaging
 └── .github/workflows/         # Release CI (wheel + .deb)
@@ -45,7 +49,7 @@ AVCardTool installs into a per-user virtual environment at `/opt/avcardtool/venv
 with a symlink at `/usr/local/bin/avcardtool`. Only two components require root:
 
 - **udev rules** (`/etc/udev/rules.d/99-avcardtool-sdcard.rules`) — triggers on SD card insertion
-- **systemd service** (`/lib/systemd/system/avcardtool-processor@.service`) — runs the processor
+- **systemd units** (`/lib/systemd/system/avcardtool-*`) — on-insert processor/navdata services, daily navdata-check timer, weekly self-update timer
 
 Everything else lives in user-space:
 
@@ -66,11 +70,25 @@ bump to `main` triggers the release CI, which builds a wheel and a `.deb`.
 
 ### SD Card Insertion (Automatic)
 
-1. **udev** detects a `vfat` block device and starts a systemd service instance.
-2. **systemd** executes `avcardtool auto-process /dev/sdX`.
+1. **udev** detects a `vfat` block device and starts systemd service instances.
+2. **systemd** executes `avcardtool auto-process /dev/sdX` and
+   `avcardtool navdata auto-update /dev/sdX`.
 3. **Flight Data**: deduplicates files, analyzes logs (Hobbs/Tach/OOOI), uploads.
 4. **Navdata** (if `auto_download: true`): checks for newer cycles, downloads and writes to card.
-5. Card is ready.
+5. **Notifications** (if enabled): a summary email is sent with the final
+   times/stats and any databases installed.
+6. Card is ready.
+
+### Daily Re-Check (Cards Left Inserted)
+
+`avcardtool-navdata-check.timer` runs `avcardtool navdata auto-update`
+(no device argument — scans every mounted FAT32 card) daily at ~03:00
+with `Persistent=true` and a randomized delay. Because auto-update is
+idempotent, quiet days cost one aircraft API call; when a new cycle is
+published, the card in the reader is updated overnight and a
+`navdata_updated` email announces it. Failures — most importantly an
+expired Garmin login, which would otherwise stop updates silently —
+produce ERROR notifications (auth alerts rate-limited to one per 24h).
 
 ### Manual Navdata Update
 

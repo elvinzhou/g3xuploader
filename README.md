@@ -15,6 +15,8 @@ Built for reliability on Raspberry Pi and other Linux systems, AVCardTool is des
 - **Poetry-Backed**: Strictly locked dependencies for reproducible environments.
 - **Robust Garmin SSO**: Direct integration with flyGarmin (Aviation flow) with MFA support.
 - **Automatic SD Card Detection**: Triggered by udev, processed by systemd.
+- **Cards Stay Current**: A daily systemd timer re-checks flyGarmin so a card left in the reader picks up new cycles automatically.
+- **Email Notifications**: A summary email after each processing run (final Hobbs/Tach times, upload results) and whenever new database cycles land on a card — plus alerts when something needs attention (e.g. an expired flyGarmin login).
 - **Manufacturer-Agnostic**: Modular design to support various avionics (Garmin G3X, etc.).
 
 ## Installation
@@ -45,7 +47,7 @@ The setup wizard runs automatically at the end of a fresh install. You can also 
 avcardtool setup
 ```
 
-The wizard covers four sections. Each major feature is opt-in — only its follow-up questions are shown if you enable it.
+The wizard covers five sections. Each major feature is opt-in — only its follow-up questions are shown if you enable it.
 
 ### System Settings
 
@@ -104,6 +106,31 @@ If you say Yes, the wizard prompts for your flyGarmin credentials and logs in im
 
 On success, a session token is saved to `<data_dir>/` and used for all future database downloads. You can re-authenticate at any time with `avcardtool navdata login`.
 
+### Email Notifications
+
+> **Enable email notifications?** *(default: No)*
+
+If enabled, avcardtool emails you after each automatic run: flight-log
+summaries with the final Hobbs/Tach times and per-service upload results,
+navdata install reports (old cycle → new cycle, effective dates), and
+alerts when something needs attention — most importantly when the
+flyGarmin login expires and automatic updates would otherwise stop
+silently.
+
+| Prompt | Default | Description |
+|--------|---------|-------------|
+| SMTP server | `smtp.gmail.com` | Any SMTP provider works |
+| SMTP port | `587` | 587 = STARTTLS, 465 = implicit TLS |
+| SMTP username | — | Usually your email address; leave empty for localhost relays (no auth) |
+| SMTP password | — | For Gmail accounts with 2FA, use an [App Password](https://myaccount.google.com/apppasswords) |
+| From / To addresses | username | Recipients accept a comma-separated list |
+
+The wizard offers to send a test email immediately so you know delivery
+works before the first real notification. You can re-test any time with
+`avcardtool notify-test`. Severity is encoded in the subject prefix
+(`[AVCardTool]`, `[AVCardTool WARNING]`, `[AVCardTool ERROR]`) for easy
+inbox filtering.
+
 ### Saving Configuration
 
 The wizard confirms where to write the config file (default: `~/.config/avcardtool/config.json` for non-root, `/etc/avcardtool/config.json` when running as root) and warns before overwriting an existing file.
@@ -141,6 +168,9 @@ avcardtool navdata install DB.taw         # Install to SD card
 avcardtool config show                    # Print current configuration
 avcardtool config validate                # Validate configuration file
 
+# Notifications
+avcardtool notify-test                    # Send a test notification email
+
 # Automatic processing (used by systemd)
 avcardtool auto-process [DEVICE]          # Process both flight data and navdata
 ```
@@ -149,13 +179,19 @@ avcardtool auto-process [DEVICE]          # Process both flight data and navdata
 
 When an SD card is inserted:
 1. **Udev** detects the card.
-2. **Systemd** starts `avcardtool-processor@.service`.
+2. **Systemd** starts `avcardtool-processor@.service` and `avcardtool-navdata@.service`.
 3. **Flight logs** are parsed, analyzed (Hobbs/Tach/OOOI), and uploaded.
 4. **Navdata updates** are automatically checked and installed.
+5. **Notifications** (if enabled) email you the results.
+
+Cards left in the reader stay current: `avcardtool-navdata-check.timer`
+re-runs the navdata check daily at ~03:00 across all mounted cards
+(`Persistent=true` catches up after a power-off), so a new cycle published
+overnight is installed before a morning flight.
 
 View logs:
 ```bash
-journalctl -u avcardtool-processor@* -f
+journalctl -u 'avcardtool-*' -f
 ```
 
 ## Development

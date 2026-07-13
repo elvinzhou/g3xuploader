@@ -1,0 +1,15 @@
+[Unit]
+Description=AVCardTool Daily NavData Update Check Timer
+Documentation=https://github.com/elvinzhou/g3xuploader
+
+[Timer]
+# 03:00 local time: a cycle published overnight is on any inserted card
+# before a morning flight.
+OnCalendar=*-*-* 03:00
+# Spread load — don't have every install hit flyGarmin at the same second
+RandomizedDelaySec=1800
+# If the machine was off at 03:00, run the check at next boot
+Persistent=true
+
+[Install]
+WantedBy=timers.target

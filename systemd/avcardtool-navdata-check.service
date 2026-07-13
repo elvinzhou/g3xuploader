@@ -1,0 +1,27 @@
+[Unit]
+Description=AVCardTool Daily NavData Update Check
+Documentation=https://github.com/elvinzhou/g3xuploader
+Wants=network-online.target
+After=network-online.target udisks2.service
+
+[Service]
+Type=oneshot
+# No device argument: auto-update scans every mounted FAT32 card, so a
+# single system-wide unit covers however many cards are inserted.
+# auto-update is idempotent — if nothing changed it exits immediately.
+ExecStart=/usr/local/bin/avcardtool navdata auto-update
+StandardOutput=journal
+StandardError=journal
+User=AVCARDTOOL_USER
+Group=AVCARDTOOL_USER
+
+# Security hardening (mirrors avcardtool-navdata@.service)
+PrivateTmp=yes
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=AVCARDTOOL_DATA_DIR AVCARDTOOL_CONFIG_DIR /media
+
+# Downloads can be large (~600 MB) and the card write is slow
+TimeoutStartSec=1800
+CPUQuota=50%
+MemoryMax=512M

@@ -3219,7 +3219,7 @@ def setup_wizard(ctx, config_path: Optional[Path]):
     """
     from avcardtool.core.config import (
         Config, SystemConfig, FlightDataConfig, NavdataConfig,
-        EngineTimeConfig, AirframeTimeConfig, UploaderConfig
+        NotificationsConfig, EngineTimeConfig, AirframeTimeConfig, UploaderConfig
     )
 
     click.echo("\n" + "=" * 60)
@@ -3478,7 +3478,90 @@ def setup_wizard(ctx, config_path: Optional[Path]):
             auto_update_navdata = False
 
     # ------------------------------------------------------------------
-    # Section 4: Save configuration
+    # Section 5: Email notifications
+    # ------------------------------------------------------------------
+    click.echo("\n── Email Notifications ───────────────────────────────────")
+    click.echo(
+        "\navcardtool can email you after flight logs are processed (with the\n"
+        "final Hobbs/Tach times and upload results) and when new database\n"
+        "cycles are installed to a card — plus alerts when something needs\n"
+        "attention, such as an expired flyGarmin login.\n"
+    )
+
+    notifications_enabled = click.confirm("Enable email notifications?", default=False)
+    notification_backends = {}
+
+    if notifications_enabled:
+        click.echo(
+            "\n  Any SMTP provider works. Gmail accounts with 2FA need an App\n"
+            "  Password (https://myaccount.google.com/apppasswords) — your\n"
+            "  normal password will be rejected.\n"
+        )
+        smtp_host = click.prompt("  SMTP server", default="smtp.gmail.com")
+        smtp_port = click.prompt(
+            "  SMTP port (587 = STARTTLS, 465 = implicit TLS)", default=587, type=int
+        )
+        smtp_username = click.prompt(
+            "  SMTP username (usually your email address; empty for localhost relays)",
+            default="", show_default=False
+        )
+        smtp_password = _prompt_password("  SMTP password: ") if smtp_username else ""
+        from_addr = click.prompt(
+            "  From address",
+            default=smtp_username if '@' in smtp_username else None
+        )
+        to_raw = click.prompt(
+            "  Send notifications to (comma-separated)",
+            default=smtp_username if '@' in smtp_username else None
+        )
+        to_addrs = [addr.strip() for addr in to_raw.split(',') if addr.strip()]
+
+        notification_backends['email'] = {
+            'enabled': True,
+            'smtp_host': smtp_host,
+            'smtp_port': smtp_port,
+            # TLS always, except for localhost relays (mirrors the backend's
+            # policy of refusing plaintext to any remote host)
+            'use_tls': smtp_host not in ('localhost', '127.0.0.1', '::1'),
+            'username': smtp_username,
+            'password': smtp_password,
+            'from_addr': from_addr,
+            'to_addrs': to_addrs,
+        }
+
+        if click.confirm("\n  Send a test email now?", default=True):
+            import socket as _socket
+            from avcardtool.notifications.backends.email_smtp import EmailBackend
+            from avcardtool.notifications.base import NotificationEvent, Severity
+
+            backend = EmailBackend(notification_backends['email'])
+            problems = backend.validate_config()
+            if problems:
+                for problem in problems:
+                    click.echo(f"    ✗ {problem}")
+            else:
+                click.echo("    Sending...")
+                result = backend.send(NotificationEvent(
+                    event_type="test",
+                    severity=Severity.INFO,
+                    title="Test notification",
+                    body=(
+                        f"avcardtool setup on {_socket.gethostname()} can send email.\n"
+                        "Notification delivery is working."
+                    ),
+                ))
+                if result.success:
+                    click.echo(f"    ✓ {result.message}")
+                else:
+                    click.echo(f"    ✗ {result.message}")
+                    if not click.confirm(
+                        "    Keep this email configuration anyway?", default=True
+                    ):
+                        notifications_enabled = False
+                        notification_backends = {}
+
+    # ------------------------------------------------------------------
+    # Section 6: Save configuration
     # ------------------------------------------------------------------
     click.echo("\n── Saving Configuration ──────────────────────────────────")
 
@@ -3514,6 +3597,10 @@ def setup_wizard(ctx, config_path: Optional[Path]):
     cfg.navdata.auto_download = auto_update_navdata
     cfg.navdata.garmin = navdata_garmin
 
+    cfg.notifications = NotificationsConfig()
+    cfg.notifications.enabled = notifications_enabled
+    cfg.notifications.backends = notification_backends
+
     cfg.system = SystemConfig()
     cfg.system.data_dir = data_dir
     cfg.system.log_file = str(Path(data_dir) / "avcardtool.log")
@@ -3534,7 +3621,7 @@ def setup_wizard(ctx, config_path: Optional[Path]):
     click.echo("Setup complete!")
     click.echo("=" * 60)
 
-    if auto_process_flights or auto_update_navdata or auto_self_update:
+    if auto_process_flights or auto_update_navdata or auto_self_update or notifications_enabled:
         click.echo("\nEnabled features:")
         if auto_process_flights:
             click.echo("  ✓ Flight log processing")
@@ -3542,10 +3629,12 @@ def setup_wizard(ctx, config_path: Optional[Path]):
             click.echo("  ✓ Navigation database auto-update")
         if auto_self_update:
             click.echo("  ✓ Automatic weekly self-update")
+        if notifications_enabled:
+            click.echo("  ✓ Email notifications")
         if auto_process_flights or auto_update_navdata:
             click.echo("\nInsert your SD card to trigger both.")
         click.echo("Monitor progress:")
-        click.echo('  journalctl -u "avcardtool-*@*" -f')
+        click.echo('  journalctl -u "avcardtool-*" -f')
     else:
         click.echo(
             "\nNo automated features were enabled.\n"
@@ -3568,7 +3657,7 @@ def config(ctx):
 @config.command('show')
 @click.option(
     '--section',
-    type=click.Choice(['flight_data', 'navdata', 'system', 'all']),
+    type=click.Choice(['flight_data', 'navdata', 'notifications', 'system', 'all']),
     default='all',
     help='Configuration section to show'
 )
@@ -3859,9 +3948,14 @@ def _update_system_files(ctx: click.Context, version: Optional[str]) -> None:
             "substitute": True,
         },
         {
-            "url": f"{base_url}/systemd/avcardtool-navdata-watch@.service",
-            "dest": Path("/lib/systemd/system/avcardtool-navdata-watch@.service"),
+            "url": f"{base_url}/systemd/avcardtool-navdata-check.service",
+            "dest": Path("/lib/systemd/system/avcardtool-navdata-check.service"),
             "substitute": True,
+        },
+        {
+            "url": f"{base_url}/systemd/avcardtool-navdata-check.timer",
+            "dest": Path("/lib/systemd/system/avcardtool-navdata-check.timer"),
+            "substitute": False,
         },
         {
             "url": f"{base_url}/systemd/avcardtool-self-update.service",
@@ -3889,6 +3983,19 @@ def _update_system_files(ctx: click.Context, version: Optional[str]) -> None:
 
     click.echo("\nUpdating system files...")
     import requests as _requests
+
+    # The per-card navdata-watch sleep loop was replaced by the system-wide
+    # navdata-check timer — clean it up on installs that predate the change.
+    legacy_watch = Path("/lib/systemd/system/avcardtool-navdata-watch@.service")
+    if legacy_watch.exists():
+        try:
+            subprocess.run(
+                ["systemctl", "stop", "avcardtool-navdata-watch@*"], capture_output=True
+            )
+            legacy_watch.unlink()
+            click.echo(f"  Removed legacy {legacy_watch.name}")
+        except Exception as e:
+            click.echo(f"  Warning: could not remove {legacy_watch.name}: {e}", err=True)
 
     any_updated = False
     for entry in system_files:
@@ -3972,6 +4079,19 @@ def _update_system_files(ctx: click.Context, version: Optional[str]) -> None:
             click.echo(f"  Disabled {timer} (auto_self_update=false in config).")
     except Exception as e:
         click.echo(f"  Warning: could not update {timer}: {e}", err=True)
+
+    # Enable or disable the daily navdata re-check timer based on config
+    auto_update_navdata = cfg.system.auto_update_navdata if cfg else False
+    check_timer = "avcardtool-navdata-check.timer"
+    try:
+        if auto_update_navdata:
+            subprocess.run(["systemctl", "enable", "--now", check_timer], check=True, capture_output=True)
+            click.echo(f"  Enabled {check_timer}.")
+        else:
+            subprocess.run(["systemctl", "disable", "--now", check_timer], capture_output=True)
+            click.echo(f"  Disabled {check_timer} (auto_update_navdata=false in config).")
+    except Exception as e:
+        click.echo(f"  Warning: could not update {check_timer}: {e}", err=True)
 
 
 # ============================================================================

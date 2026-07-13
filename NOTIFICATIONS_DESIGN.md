@@ -1,8 +1,10 @@
 # AVCardTool — Notifications System Design
 
-**Status: Phase 1 implemented** (notifications package, email backend,
-event wiring in both auto flows, `notify-test`). Phases 2–3 remain
-proposals.
+**Status: Phases 1–2 implemented** — Phase 1: notifications package,
+email backend, event wiring in both auto flows, `notify-test`. Phase 2:
+`avcardtool-navdata-check.timer` replaces the per-card watch sleep loop
+(§8), setup wizard "Email Notifications" section, README/ARCHITECTURE
+updates. Phase 3 remains proposed.
 **Scope decision:** the first (and for now only) delivery backend is
 **email over SMTP** — stdlib-only, no third-party service, no new
 dependencies. The backend interface stays pluggable so push services can

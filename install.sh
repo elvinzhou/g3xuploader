@@ -66,6 +66,8 @@ fi
 systemctl stop 'avcardtool-processor@*' 2>/dev/null || true
 systemctl stop 'avcardtool-navdata@*' 2>/dev/null || true
 systemctl stop 'avcardtool-navdata-watch@*' 2>/dev/null || true
+systemctl stop avcardtool-navdata-check.timer 2>/dev/null || true
+systemctl stop avcardtool-navdata-check.service 2>/dev/null || true
 systemctl stop avcardtool-self-update.timer 2>/dev/null || true
 systemctl stop avcardtool-self-update.service 2>/dev/null || true
 
@@ -303,12 +305,21 @@ fi
 
 if [ "$ENABLE_NAVDATA" = "yes" ]; then
     install_service "avcardtool-navdata@.service"
-    install_service "avcardtool-navdata-watch@.service"
+    install_service "avcardtool-navdata-check.service"
+    install_service "avcardtool-navdata-check.timer"
+    systemctl enable --now avcardtool-navdata-check.timer
+    echo "  Enabled avcardtool-navdata-check.timer (daily ~03:00)"
     INSTALLED_SERVICES=$((INSTALLED_SERVICES + 1))
 else
+    systemctl disable avcardtool-navdata-check.timer 2>/dev/null || true
     rm -f /lib/systemd/system/avcardtool-navdata@.service
-    rm -f /lib/systemd/system/avcardtool-navdata-watch@.service
+    rm -f /lib/systemd/system/avcardtool-navdata-check.service
+    rm -f /lib/systemd/system/avcardtool-navdata-check.timer
 fi
+
+# The per-card navdata-watch sleep loop is replaced by the system-wide
+# navdata-check timer above — remove it from older installs.
+rm -f /lib/systemd/system/avcardtool-navdata-watch@.service
 
 if [ "$ENABLE_SELF_UPDATE" = "yes" ]; then
     install_service "avcardtool-self-update.service"
@@ -371,7 +382,7 @@ echo ""
 echo "Next steps:"
 echo "  1. Insert your SD card — processing starts automatically"
 echo "  2. Monitor progress:"
-echo "     journalctl -u 'avcardtool-*@*' -f"
+echo "     journalctl -u 'avcardtool-*' -f"
 echo ""
 echo "To re-run setup or change credentials:"
 echo "  avcardtool setup"
