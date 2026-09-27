@@ -100,6 +100,9 @@ class CloudAhoyUploader(FlightDataUploader):
                 message="CloudAhoy API token not configured"
             )
 
+        if self.dry_run:
+            return self._dry_run_result(self.SERVICE_NAME, f"payload: debug/cloudahoy_{Path(flight_data.file_path).stem}.json")
+
         try:
             headers = {
                 "Authorization": f"Bearer {self.api_token}"

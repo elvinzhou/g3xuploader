@@ -86,6 +86,10 @@ class SavvyAviationUploader(FlightDataUploader):
                 message="Savvy Aviation upload not enabled"
             )
 
+        if self.dry_run:
+            dest = self.staging_dir / Path(flight_data.file_path).name
+            return self._dry_run_result(self.SERVICE_NAME, f"would stage to {dest}")
+
         try:
             # Create staging directory
             self.staging_dir.mkdir(parents=True, exist_ok=True)

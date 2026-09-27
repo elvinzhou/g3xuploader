@@ -194,6 +194,73 @@ View logs:
 journalctl -u 'avcardtool-*' -f
 ```
 
+### Testing with a Real Card (Dry Run)
+
+The global `--dry-run` flag runs the real pipeline against a real card but
+writes nothing:
+
+- **SD card** — mounted read-only if avcardtool mounts it; nothing is written
+  (`navdata install` refuses outright under `--dry-run`).
+- **Uploads** — each uploader still checks its credentials and saves the exact
+  payload to `<data_dir>/debug/`, then stops before any network request
+  (FlySto doesn't refresh its token; Savvy doesn't copy to staging).
+- **State** — `processed_files.json` is read and dedup behaves normally within
+  the run, but changes stay in memory; `carryd_state.json` is not updated.
+- **Notifications** — printed to the terminal, with who they'd go to (or why
+  they wouldn't be sent). Add `--send-notifications` to really send them, with
+  the subject tagged `[DRY RUN]`.
+- **Navdata** — `navdata auto-update` reads the card and asks flyGarmin what
+  it would install, then reports the plan (and prints the "installed" email).
+  It skips the unlock, which can use up a subscription credit, the downloads
+  and the install.
+
+Because nothing is saved, you can run the same scenario as many times as you
+like with the card left in the reader:
+
+```bash
+lsblk -f                                   # find the card, e.g. /dev/sda1
+
+# What would happen on the next insert (uses the real processed_files.json)
+avcardtool --dry-run auto-process /dev/sda1
+
+# Treat every log on the card as new (also skips first-run historical marking)
+avcardtool --dry-run auto-process /dev/sda1 --force
+
+# Check the emails themselves against real data
+avcardtool --dry-run --send-notifications auto-process /dev/sda1 --force
+
+# What navdata auto-update would install on this card
+avcardtool --dry-run navdata auto-update /dev/sda1
+```
+
+To try a specific history, point `--data-dir` at a scratch copy (never saved
+to the config) and edit its state:
+
+```bash
+cp -r ~/.local/share/avcardtool /tmp/scenario
+
+# Brand-new install: first run marks everything historical
+avcardtool --dry-run --data-dir /tmp/empty auto-process /dev/sda1
+
+# "Forget" one log so it's treated as the newest unseen flight
+jq '.processed |= with_entries(select(.value.filename != "log_20260327_152821_KOAK.csv"))' \
+  /tmp/scenario/processed_files.json > /tmp/p.json && mv /tmp/p.json /tmp/scenario/processed_files.json
+avcardtool --dry-run --data-dir /tmp/scenario auto-process /dev/sda1
+```
+
+To exercise the full udev → systemd path, set `"dry_run": true` under `system`
+in the config and re-trigger the insert without pulling the card:
+
+```bash
+sudo systemctl start avcardtool-processor@sda1.service   # flight logs only
+# or replay the whole insert (also starts avcardtool-navdata@sda1):
+sudo udevadm trigger --action=add --sysname-match=sda1
+journalctl -u 'avcardtool-*' -f
+```
+
+`system.dry_run` applies to every command, navdata included, so remove it
+when you're done or the Pi will stop uploading and updating.
+
 ## Development
 
 AVCardTool uses **Poetry** for dependency management and **Nuitka** for standalone compilation.

@@ -181,6 +181,9 @@ class CarrydUploader(FlightDataUploader):
                 message="Carryd API key not configured"
             )
 
+        if self.dry_run:
+            return self._dry_run_result(self.SERVICE_NAME, json.dumps(payload, default=str))
+
         # Uncomment once GET /api/v1/aircraft is available to skip redundant pushes.
         # current = self.get_current_times(registration=registration)
         # if current is not None:
