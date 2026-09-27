@@ -463,7 +463,9 @@ class TestNotificationsConfig:
             "notifications": {
                 "enabled": True,
                 "backends": {"email": {"enabled": True}},
-            }
+            },
+            # validate() checks data_dir's parent exists; don't depend on $HOME
+            "system": {"data_dir": str(tmp_path / "data")},
         }))
         cfg = Config(config_path=config_path)
         with pytest.raises(ValueError, match="smtp_host"):
@@ -475,7 +477,9 @@ class TestNotificationsConfig:
             "notifications": {
                 "enabled": True,
                 "backends": {"email": {"enabled": False}},
-            }
+            },
+            # validate() checks data_dir's parent exists; don't depend on $HOME
+            "system": {"data_dir": str(tmp_path / "data")},
         }))
         cfg = Config(config_path=config_path)
         assert cfg.validate() is True
