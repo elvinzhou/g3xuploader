@@ -21,15 +21,23 @@ class ProcessedFilesDatabase:
     is never processed twice even if copied or renamed.
     """
 
-    def __init__(self, db_path: Path):
+    def __init__(self, db_path: Path, read_only: bool = False):
         """
         Initialize the processed files database.
 
         Args:
             db_path: Path to JSON database file
+            read_only: Load from disk once and keep every change in memory
+                (used by --dry-run). Within one run, dedup behaves exactly
+                as it would for real; nothing is ever written.
         """
         self.db_path = Path(db_path)
-        self._ensure_db_exists()
+        self.read_only = read_only
+        self._memory: Optional[Dict[str, Any]] = None
+        if read_only:
+            self._memory = self._load_from_disk()
+        else:
+            self._ensure_db_exists()
 
     def _ensure_db_exists(self):
         """Ensure the database file and directory exist."""
@@ -39,7 +47,15 @@ class ProcessedFilesDatabase:
             self._save({'processed': {}, 'version': 1})
 
     def _load(self) -> Dict[str, Any]:
+        """Load database (from memory in read-only mode)."""
+        if self.read_only:
+            return self._memory
+        return self._load_from_disk()
+
+    def _load_from_disk(self) -> Dict[str, Any]:
         """Load database from disk."""
+        if not self.db_path.exists():
+            return {'processed': {}, 'version': 1}
         try:
             with open(self.db_path, 'r', encoding='utf-8') as f:
                 return json.load(f)
@@ -48,7 +64,10 @@ class ProcessedFilesDatabase:
             return {'processed': {}, 'version': 1}
 
     def _save(self, data: Dict[str, Any]):
-        """Save database to disk."""
+        """Save database to disk (to memory only in read-only mode)."""
+        if self.read_only:
+            self._memory = data
+            return
         try:
             with open(self.db_path, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2)
@@ -144,7 +163,8 @@ class ProcessedFilesDatabase:
         data['processed'][file_hash] = record
 
         self._save(data)
-        logger.info(f"Marked file as processed: {file_path.name} ({file_hash[:8]}...)")
+        suffix = " [dry run: in memory only]" if self.read_only else ""
+        logger.info(f"Marked file as processed: {file_path.name} ({file_hash[:8]}...){suffix}")
 
     def mark_historical(self, file_hash: str, file_path: Path, flight_fingerprint: Optional[str] = None):
         """

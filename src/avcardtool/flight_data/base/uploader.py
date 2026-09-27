@@ -61,6 +61,11 @@ class FlightDataUploader(ABC):
         self.enabled = config.get('enabled', False)
         self.debug = config.get('debug', False)
         self.data_dir = config.get('data_dir', '/var/lib/avcardtool')
+        # Dry run: build and save the payload (as debug mode does) but
+        # return before any network request.
+        self.dry_run = config.get('dry_run', False)
+        if self.dry_run:
+            self.debug = True
 
     @abstractmethod
     def authenticate(self) -> bool:
@@ -179,6 +184,15 @@ class FlightDataUploader(ABC):
             logger.debug(f"[DEBUG] Saved payload to {dest}")
         except Exception as e:
             logger.warning(f"Could not save debug payload: {e}")
+
+    def _dry_run_result(self, service: str, detail: str = "") -> UploadResult:
+        """Result returned in place of a real upload when dry_run is set."""
+        message = "Dry run — not sent"
+        if detail:
+            message += f" ({detail})"
+        logger.info(f"[DRY RUN] {service}: {message}")
+        return UploadResult(success=True, service=service, message=message,
+                            metadata={'dry_run': True})
 
     def should_upload(self, flight_data: FlightData) -> bool:
         """

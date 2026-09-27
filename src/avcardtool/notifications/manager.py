@@ -8,6 +8,7 @@ Guarantees to callers in the processing pipeline:
   * event-type filtering and per-event rate limits come from config
 """
 
+import dataclasses
 import json
 import logging
 import time
@@ -34,16 +35,26 @@ RATE_LIMITED_EVENTS = {"garmin_auth_expired": 86400.0}
 
 
 class NotificationManager:
-    def __init__(self, notifications_config, data_dir: Path):
+    def __init__(self, notifications_config, data_dir: Path,
+                 dry_run: bool = False, dry_run_send: bool = False):
         self.config = notifications_config
         self.state_dir = Path(data_dir) / "notifications"
         self.state_path = self.state_dir / "state.json"
         self.backends = self._build_backends()
+        # dry_run: print events instead of sending; dry_run_send: send them
+        # anyway with a "[DRY RUN]" subject. Neither touches rate-limit state.
+        self.dry_run = dry_run
+        self.dry_run_send = dry_run_send
 
     @classmethod
     def from_config(cls, config) -> "NotificationManager":
         """Build a manager from the application Config object."""
-        return cls(config.notifications, Path(config.system.data_dir))
+        return cls(
+            config.notifications,
+            Path(config.system.data_dir),
+            dry_run=getattr(config.system, "dry_run", False),
+            dry_run_send=getattr(config.system, "dry_run_send_notifications", False),
+        )
 
     def _build_backends(self) -> List[NotificationBackend]:
         backends = []
@@ -85,6 +96,9 @@ class NotificationManager:
             return []
 
     def _notify(self, event: NotificationEvent, force: bool) -> List[NotificationResult]:
+        if self.dry_run:
+            return self._notify_dry_run(event, force)
+
         if not force:
             if not self.active:
                 return []
@@ -127,6 +141,50 @@ class NotificationManager:
             if result.success:
                 return result
         return result
+
+    def _skip_reason(self, event_type: str) -> str:
+        """Why a real run would not send this event ('' = it would be sent)."""
+        if not self.config.enabled:
+            return "notifications are disabled in config"
+        if not self.backends:
+            return "no notification backend is configured"
+        if not self.event_enabled(event_type):
+            return f"event '{event_type}' is disabled in config"
+        if self._rate_limited(event_type):
+            return "rate limited (already sent within the last 24h)"
+        return ""
+
+    def _notify_dry_run(self, event: NotificationEvent, force: bool) -> List[NotificationResult]:
+        if not event.timestamp:
+            event.timestamp = datetime.now().isoformat(timespec="seconds")
+        skip = "" if force else self._skip_reason(event.event_type)
+        backends = ", ".join(b.name for b in self.backends) or "none"
+
+        lines = [
+            "",
+            "-" * 60,
+            f"[DRY RUN] Notification: {event.event_type} ({event.severity.value})",
+            f"  Would be sent via: {backends}" if not skip
+            else f"  Would NOT be sent: {skip}",
+            f"  Subject: {event.title}",
+            "",
+            *("  " + line for line in event.body.splitlines()),
+            "-" * 60,
+        ]
+        print("\n".join(lines), flush=True)
+
+        if not self.dry_run_send:
+            return [NotificationResult(backend="dry-run", success=True, message="printed, not sent")]
+        if not self.backends:
+            logger.warning("[DRY RUN] --send-notifications: no notification backend configured")
+            return []
+
+        tagged = dataclasses.replace(event, title=f"[DRY RUN] {event.title}")
+        results = [self._send_with_retry(backend, tagged) for backend in self.backends]
+        for r in results:
+            status = "sent" if r.success else f"failed: {r.message}"
+            logger.info(f"[DRY RUN] Notification via {r.backend} {status}")
+        return results
 
     # -- rate-limit state ------------------------------------------------
 

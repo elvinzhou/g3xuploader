@@ -293,6 +293,10 @@ class FlyStoUploader(FlightDataUploader):
                 )
             )
 
+        # Checked before the token refresh, which is itself a network call
+        if self.dry_run:
+            return self._dry_run_result(self.SERVICE_NAME, f"payload: debug/flysto_{Path(flight_data.file_path).stem}.zip")
+
         # Ensure we have a valid access token
         if not self._ensure_valid_token():
             return UploadResult(

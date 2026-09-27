@@ -73,8 +73,27 @@ logger = logging.getLogger(__name__)
     is_flag=True,
     help='Enable verbose logging'
 )
+@click.option(
+    '--dry-run',
+    is_flag=True,
+    help='Read everything, write nothing: no uploads, no processed-file/state '
+         'writes, no SD card writes, no navdata downloads. Upload payloads are '
+         'saved to <data_dir>/debug/ and notifications are printed.'
+)
+@click.option(
+    '--send-notifications',
+    is_flag=True,
+    help='With --dry-run: really send notifications (subject tagged "[DRY RUN]").'
+)
+@click.option(
+    '--data-dir',
+    type=click.Path(path_type=Path, file_okay=False),
+    help='Override system.data_dir for this run (e.g. a scratch copy for testing). '
+         'Never saved to the config file.'
+)
 @click.pass_context
-def cli(ctx, config: Optional[Path], verbose: bool):
+def cli(ctx, config: Optional[Path], verbose: bool, dry_run: bool,
+        send_notifications: bool, data_dir: Optional[Path]):
     """
     Aviation Tools - Unified flight data and navigation database management.
 
@@ -91,12 +110,24 @@ def cli(ctx, config: Optional[Path], verbose: bool):
         click.echo(f"Warning: Could not load configuration: {e}", err=True)
         ctx.obj['config'] = Config()
 
+    overrides = {}
+    if dry_run:
+        overrides['dry_run'] = True
+    if send_notifications:
+        overrides['dry_run_send_notifications'] = True
+    if data_dir:
+        overrides['data_dir'] = str(data_dir.expanduser().resolve())
+    if overrides:
+        ctx.obj['config'].override_system(**overrides)
+
     # Setup logging
     log_level = 'DEBUG' if (verbose or ctx.obj['config'].system.debug) else ctx.obj['config'].system.log_level
     setup_logging(
         log_file=ctx.obj['config'].system.log_file,
         log_level=log_level
     )
+    if ctx.obj['config'].system.dry_run:
+        logger.warning("DRY RUN — nothing will be uploaded or written to the SD card")
 
 
 def _notification_manager(cfg):
@@ -104,7 +135,9 @@ def _notification_manager(cfg):
     try:
         from avcardtool.notifications import NotificationManager
         manager = NotificationManager.from_config(cfg)
-        return manager if manager.active else None
+        # In dry-run the manager prints what would be sent (and why not, if
+        # it wouldn't), so it is useful even when notifications are off.
+        return manager if (manager.active or manager.dry_run) else None
     except Exception as e:
         logger.warning(f"Notifications unavailable: {e}")
         return None
@@ -266,7 +299,8 @@ def flight_analyze(ctx, log_file: Path, output_json: bool):
 @click.option(
     '--dry-run',
     is_flag=True,
-    help='Analyze but don\'t actually upload'
+    help='Analyze and build payloads (saved to <data_dir>/debug/) but don\'t upload. '
+         'Same as the global --dry-run.'
 )
 @click.pass_context
 def flight_upload(ctx, log_file: Path, service: tuple, dry_run: bool):
@@ -281,6 +315,7 @@ def flight_upload(ctx, log_file: Path, service: tuple, dry_run: bool):
     from avcardtool.flight_data.uploaders import UPLOADERS
 
     cfg = ctx.obj['config']
+    dry_run = dry_run or cfg.system.dry_run
 
     # Try to find a processor that can handle this file
     processor = None
@@ -312,10 +347,6 @@ def flight_upload(ctx, log_file: Path, service: tuple, dry_run: bool):
             sys.exit(0)
 
         click.echo(f"✓ Flight Detected ({analysis.detection.airborne_time_minutes:.1f} minutes)")
-
-        if dry_run:
-            click.echo("\n--dry-run specified, skipping actual uploads")
-            sys.exit(0)
 
         # Get analysis summary for uploaders
         analysis_summary = analyzer.analyze_summary(flight_data)
@@ -356,6 +387,7 @@ def flight_upload(ctx, log_file: Path, service: tuple, dry_run: bool):
             uploader_config['enabled'] = uploader_cfg.enabled
             uploader_config['data_dir'] = cfg.system.data_dir
             uploader_config['debug'] = cfg.system.debug
+            uploader_config['dry_run'] = dry_run
 
             uploader = UploaderClass(uploader_config)
 
@@ -483,7 +515,8 @@ def flight_flysto_auth(ctx, authorization_code: str):
 @click.option(
     '--force',
     is_flag=True,
-    help='Re-process all files even if already marked as processed.'
+    help='Re-process all files even if already marked as processed '
+         '(also skips first-run historical marking).'
 )
 @click.pass_context
 def auto_process(ctx, path: Path, service: tuple, skip_uploads: bool, force: bool):
@@ -507,8 +540,10 @@ def auto_process(ctx, path: Path, service: tuple, skip_uploads: bool, force: boo
     from avcardtool.core import ProcessedFilesDatabase, hash_file
 
     cfg = ctx.obj['config']
+    dry_run = cfg.system.dry_run
 
-    # Resolve device path → mount point
+    # Resolve device path → mount point (always read-only: this command
+    # never writes to the card)
     if path.is_block_device():
         from avcardtool.core import resolve_device_mount_point
         try:
@@ -526,11 +561,13 @@ def auto_process(ctx, path: Path, service: tuple, skip_uploads: bool, force: boo
         path = path.resolve()
 
     click.echo(f"Processing: {path}\n")
+    if dry_run:
+        click.echo("DRY RUN: no uploads, and processed_files.json / carryd_state.json are not modified\n")
 
-    # Initialize processed files database
+    # Initialize processed files database (in-memory only for a dry run)
     db_path = Path(cfg.system.data_dir) / 'processed_files.json'
     is_first_run = not db_path.exists()
-    processed_db = ProcessedFilesDatabase(db_path)
+    processed_db = ProcessedFilesDatabase(db_path, read_only=dry_run)
 
     # Find all G3X CSV files
     log_files = []
@@ -557,7 +594,7 @@ def auto_process(ctx, path: Path, service: tuple, skip_uploads: bool, force: boo
     # On the very first run, optionally mark all existing files as historical
     # so they are skipped rather than uploaded (prevents flooding services with
     # flight history the user has already seen).
-    if is_first_run and cfg.system.mark_historical_on_first_run:
+    if is_first_run and cfg.system.mark_historical_on_first_run and not force:
         click.echo(f"First run: marking {len(log_files)} existing file(s) as historical (skipping uploads)")
         for log_file in log_files:
             file_hash = hash_file(log_file)
@@ -578,6 +615,8 @@ def auto_process(ctx, path: Path, service: tuple, skip_uploads: bool, force: boo
             processed_db.mark_historical(file_hash, log_file, fingerprint)
             click.echo(f"  ⊙ {log_file.name}" + (f"  [{fingerprint}]" if fingerprint else ""))
         click.echo("\nDone. Only flights recorded after this point will be uploaded.")
+        if dry_run:
+            click.echo("(dry run: nothing was saved; use --force to process these files anyway)")
         sys.exit(0)
 
     # Sort files chronologically using the timestamp in Garmin filenames
@@ -796,6 +835,7 @@ def auto_process(ctx, path: Path, service: tuple, skip_uploads: bool, force: boo
             uploader_config['enabled'] = uploader_cfg.enabled
             uploader_config['data_dir'] = cfg.system.data_dir
             uploader_config['debug'] = cfg.system.debug
+            uploader_config['dry_run'] = dry_run
             UploaderClass = UPLOADERS[service_name]
             uploader = UploaderClass(uploader_config)
 
@@ -865,13 +905,16 @@ def auto_process(ctx, path: Path, service: tuple, skip_uploads: bool, force: boo
                 uploader_config['enabled'] = uploader_cfg.enabled
                 uploader_config['data_dir'] = cfg.system.data_dir
                 uploader_config['debug'] = cfg.system.debug
+                uploader_config['dry_run'] = dry_run
                 carryd_uploader = UPLOADERS['carryd'](uploader_config)
                 result = carryd_uploader.upload_flight(fd_best, summary_best)
                 if result.success:
                     click.echo(f"\n  Carryd: ✓ {result.message}")
                     stats['upload_success'] += 1
                     notify_notes.append(f"Carryd: ✓ {result.message}")
-                    if candidate_ts:
+                    if candidate_ts and dry_run:
+                        click.echo(f"  (dry run: carryd_state.json not updated; would record {candidate_ts})")
+                    elif candidate_ts:
                         carryd_state['last_submitted_at'] = candidate_ts
                         try:
                             carryd_state_path.write_text(json.dumps(carryd_state, indent=2))
@@ -938,7 +981,7 @@ def auto_process(ctx, path: Path, service: tuple, skip_uploads: bool, force: boo
 
     # Summary
     click.echo(f"\n{'='*60}")
-    click.echo(f"Processing Summary")
+    click.echo("Processing Summary" + (" (DRY RUN)" if dry_run else ""))
     click.echo(f"{'='*60}")
     click.echo(f"Total files: {stats['total']}")
     click.echo(f"Already processed: {stats['already_processed']}")
@@ -1640,6 +1683,12 @@ def navdata_install(ctx, sd_card: Optional[Path], from_dir: Optional[Path], yes:
     import shutil
 
     cfg = ctx.obj['config']
+    if cfg.system.dry_run:
+        # auto-update never reaches here in a dry run; this catches a direct
+        # `avcardtool --dry-run navdata install`, which would otherwise write.
+        click.echo("DRY RUN: 'navdata install' writes to the SD card — refusing. "
+                   "Use 'avcardtool --dry-run navdata auto-update' to preview an update.", err=True)
+        sys.exit(1)
     download_dir = from_dir or (Path(cfg.system.data_dir) / "navdata")
 
     # ---------------------------------------------------------------
@@ -2123,6 +2172,10 @@ def navdata_auto_update(ctx, device: Optional[Path]):
       3. Downloads the current cycle (if the card is expired/behind) AND the
          next upcoming cycle (if already available on the server).
       4. Installs to the card and writes updated .navdata_cycles.json.
+
+    With the global --dry-run, steps 1-2 run against the real card (mounted
+    read-only) and flyGarmin, and the plan is reported, but nothing is
+    unlocked, downloaded, or written to the card.
     """
     import datetime
     import logging as _logging
@@ -2131,6 +2184,9 @@ def navdata_auto_update(ctx, device: Optional[Path]):
 
     cfg = ctx.obj['config']
     data_dir = Path(cfg.system.data_dir)
+    dry_run = cfg.system.dry_run
+    if dry_run:
+        _log.info("DRY RUN: reporting the update plan only — no unlock, download, or card writes")
 
     from avcardtool.navdata.garmin.auth import GarminAuth, GarminAPIError
     from avcardtool.navdata.garmin.api import FlyGarminAPI, BatchDatabase
@@ -2210,7 +2266,7 @@ def navdata_auto_update(ctx, device: Optional[Path]):
         from avcardtool.core import resolve_device_mount_point, get_mount_point
         already_mounted = get_mount_point(device) is not None
         try:
-            mount = resolve_device_mount_point(device, readonly=False)
+            mount = resolve_device_mount_point(device, readonly=dry_run)
         except RuntimeError as e:
             _log.error(f"Could not mount {device}: {e}")
             sys.exit(1)
@@ -2237,17 +2293,21 @@ def navdata_auto_update(ctx, device: Optional[Path]):
 
         # udisks2 sometimes auto-mounts FAT volumes read-only (e.g. dirty bit).
         # Ensure we have read-write access before attempting any writes.
+        # A dry run only reads, so it uses the existing mount as-is.
         from avcardtool.core import resolve_device_mount_point
         from avcardtool.core.utils import _is_mounted_readonly
-        was_readonly = _is_mounted_readonly(Path(card.device_path))
-        try:
-            mount = resolve_device_mount_point(Path(card.device_path), readonly=False)
-        except RuntimeError as e:
-            _log.error(f"  Could not get read-write mount for {card.device_path}: {e}")
-            issues.append(("ERROR", f"Mount failed for {card.device_path}: {e}"))
-            continue
-        if was_readonly:
-            _we_remounted.append(str(mount))
+        if dry_run:
+            mount = Path(card.mount_point)
+        else:
+            was_readonly = _is_mounted_readonly(Path(card.device_path))
+            try:
+                mount = resolve_device_mount_point(Path(card.device_path), readonly=False)
+            except RuntimeError as e:
+                _log.error(f"  Could not get read-write mount for {card.device_path}: {e}")
+                issues.append(("ERROR", f"Mount failed for {card.device_path}: {e}"))
+                continue
+            if was_readonly:
+                _we_remounted.append(str(mount))
 
         _log.info(f"Processing card: {mount}  serial={card.volume_id}")
 
@@ -2338,10 +2398,19 @@ def navdata_auto_update(ctx, device: Optional[Path]):
             _log.info(f"  All databases current — nothing to do.")
             continue
 
+        card_serial = card.volume_id or "0"
+
+        if dry_run:
+            _report_navdata_dry_run(
+                _log, notify_manager, plan, already_current, mount,
+                data_dir / "navdata" / "cache", card_serial, target_dev.name,
+                ac.tail_number,
+            )
+            continue
+
         # ---------------------------------------------------------------
         # Download with shared cache + coordination
         # ---------------------------------------------------------------
-        card_serial = card.volume_id or "0"
         cache_dir = data_dir / "navdata" / "cache"
         cache_dir.mkdir(parents=True, exist_ok=True)
         card_dir  = data_dir / "navdata" / f"auto_{card_serial.replace('-', '')}"
@@ -2597,7 +2666,7 @@ def navdata_auto_update(ctx, device: Optional[Path]):
         if notify_manager and any(sev == "ERROR" for sev, _ in issues):
             notify_manager.notify(build_navdata_update_failed_event(issues))
     else:
-        _log.info("Navdata update completed successfully.")
+        _log.info("Navdata dry run completed." if dry_run else "Navdata update completed successfully.")
 
     if _we_mounted:
         try:
@@ -2611,6 +2680,70 @@ def navdata_auto_update(ctx, device: Optional[Path]):
             _log.info(f"Unmounted {mount_point}")
         except Exception as e:
             _log.warning(f"Could not unmount {mount_point}: {e}")
+
+
+def _report_navdata_dry_run(
+    _log, notify_manager, plan: list, already_current: list, mount: Path,
+    cache_dir: Path, card_serial: str, avionics: str, aircraft: Optional[str],
+) -> None:
+    """
+    Report what navdata auto-update would install on one card, without
+    unlocking, downloading, or writing anything.
+
+    Mirrors the real run's cache check: an issue already downloaded whose
+    feat_unlk.dat CRC matches the card would be skipped there, so it is
+    reported as skipped here too. Everything else would be downloaded (or
+    reused from cache) and installed.
+    """
+    from avcardtool.notifications.events import build_navdata_updated_event
+
+    feat_unlk_crcs = _read_feat_unlk_crcs(mount)
+    dl_state = _read_dl_state(cache_dir) if cache_dir.exists() else {}
+
+    would_install = []
+    seen: set = set()
+    for avdb, s, issue, old_issue, is_upcoming in plan:
+        key = (avdb.name, issue.name)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        cache_key = f"{s.series_id}/{issue.name}"
+        cached = dl_state.get(cache_key, {})
+        feat_name = _AVDB_TO_FEAT_UNLK.get(avdb.name)
+        if (cached.get("status") == "complete"
+                and feat_name
+                and feat_unlk_crcs.get(feat_name)
+                and cached.get("feature_crcs", {}).get(feat_name) == feat_unlk_crcs[feat_name]):
+            _log.info(f"  [DRY RUN] {avdb.name}/{issue.name}: feat_unlk CRC matches cache — would skip")
+            continue
+
+        source = "from cache" if cached.get("status") == "complete" else "download"
+        label = "pre-load upcoming" if is_upcoming else "install"
+        _log.info(
+            f"  [DRY RUN] would {label} {avdb.name}: {old_issue or 'none'} → {issue.name} "
+            f"({source}, effective {issue.effective_at or 'unknown'})"
+        )
+        would_install.append({
+            "database": avdb.name,
+            "old_issue": old_issue,
+            "new_issue": issue.name,
+            "effective_at": issue.effective_at,
+            "upcoming": is_upcoming,
+        })
+
+    if not would_install:
+        _log.info(f"  [DRY RUN] Nothing would be installed on {mount}")
+        return
+
+    if notify_manager:
+        notify_manager.notify(build_navdata_updated_event(
+            card_serial=card_serial,
+            avionics=avionics,
+            aircraft=aircraft,
+            installed=would_install,
+            already_current=already_current,
+        ))
 
 
 def _fmt_size(n: int) -> str:

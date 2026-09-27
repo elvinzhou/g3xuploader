@@ -112,6 +112,12 @@ class SystemConfig:
     auto_process_flights: bool = False
     auto_update_navdata: bool = False
     auto_self_update: bool = True
+    # Dry run: read everything, write nothing (no uploads, no dedup/state
+    # writes, no card writes, notifications printed instead of sent).
+    dry_run: bool = False
+    # Only meaningful with dry_run: actually send notifications, tagged
+    # "[DRY RUN]", so email formatting can be checked against real data.
+    dry_run_send_notifications: bool = False
 
 
 class Config:
@@ -153,6 +159,9 @@ class Config:
         self.navdata = NavdataConfig()
         self.notifications = NotificationsConfig()
         self.system = SystemConfig()
+        # Original values of system fields overridden from the command line;
+        # to_dict() restores these so a save never persists a CLI override.
+        self._system_overrides: Dict[str, Any] = {}
 
         if self.config_path and self.config_path.exists():
             self.load()
@@ -242,6 +251,23 @@ class Config:
             self.system.auto_process_flights = sys.get("auto_process_flights", self.system.auto_process_flights)
             self.system.auto_update_navdata = sys.get("auto_update_navdata", self.system.auto_update_navdata)
             self.system.auto_self_update = sys.get("auto_self_update", self.system.auto_self_update)
+            self.system.dry_run = sys.get("dry_run", self.system.dry_run)
+            self.system.dry_run_send_notifications = sys.get(
+                "dry_run_send_notifications", self.system.dry_run_send_notifications
+            )
+
+    def override_system(self, **values: Any) -> None:
+        """
+        Apply runtime-only overrides to system settings (e.g. --dry-run).
+
+        Overridden values take effect for this process but are never written
+        back by save(), so a dry-run invocation of a command that saves the
+        config cannot leave production silently in dry-run mode.
+        """
+        for key, value in values.items():
+            if key not in self._system_overrides:
+                self._system_overrides[key] = getattr(self.system, key)
+            setattr(self.system, key, value)
 
     def save(self, path: Optional[Path] = None) -> None:
         """
@@ -285,7 +311,7 @@ class Config:
                 "garmin": self.navdata.garmin
             },
             "notifications": asdict(self.notifications),
-            "system": asdict(self.system)
+            "system": {**asdict(self.system), **self._system_overrides}
         }
 
     def _is_legacy_config(self, data: Dict[str, Any]) -> bool:
