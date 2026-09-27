@@ -263,28 +263,70 @@ when you're done or the Pi will stop uploading and updating.
 
 ## Development
 
-AVCardTool uses **Poetry** for dependency management and **Nuitka** for standalone compilation.
+AVCardTool uses **Poetry** for dependency management. Releases ship as a
+wheel packaged into a `.deb`.
 
 ### Setup
 
 ```bash
 git clone https://github.com/elvinzhou/g3xuploader.git
-cd avcardtool
+cd g3xuploader
 poetry install
 ```
 
 ### Run Tests
 
 ```bash
-export PYTHONPATH=$PYTHONPATH:$(pwd)/src
 poetry run pytest
 ```
 
-### Build Standalone Binary
+### Build Packages
 
 ```bash
-poetry run python -m nuitka --onefile --standalone --include-package=avcardtool src/avcardtool/cli.py -o avcardtool
+poetry build              # wheel + sdist in dist/
+bash package_deb.sh       # .deb from the wheel (needs dpkg-dev)
 ```
+
+A standalone single-file binary can be built with PyInstaller (a dev
+dependency), using `avcardtool_wrapper.py` as the entry point:
+
+```bash
+poetry run pyinstaller --onefile --name avcardtool --paths src \
+  --collect-submodules avcardtool avcardtool_wrapper.py
+./dist/avcardtool --version
+```
+
+### Releasing
+
+Releases are automatic. Every push to `main` runs
+[`release.yml`](.github/workflows/release.yml), which works out the next
+version from the [Conventional Commit](https://www.conventionalcommits.org)
+subjects since the last `v*` tag:
+
+| Commit subject | Release | Example |
+|----------------|---------|---------|
+| `feat: ...` | minor | 1.8.5 → 1.9.0 |
+| `fix:`, `perf:`, `refactor:`, `revert:`, `build:`, `deps:` | patch | 1.8.5 → 1.8.6 |
+| `feat!: ...`, or `BREAKING CHANGE:` in the body | major | 1.8.5 → 2.0.0 |
+| `docs:`, `chore:`, `ci:`, `test:`, `style:` | none | — |
+| anything else (e.g. `navdata: ...`) | patch | 1.8.5 → 1.8.6 |
+
+A scope is allowed, e.g. `fix(carryd): ...`. The largest bump among the
+commits wins. When a release is due, the workflow runs the tests, bumps the
+version with `bump-my-version` (`pyproject.toml`, `__init__.py`,
+`install.sh`), pushes a `Bump version: X → Y` commit and `vY` tag to `main`,
+builds the `.deb`, and publishes a GitHub Release. The release notes list
+features and fixes grouped from the commit subjects. Installed Pis pick it up
+via `avcardtool self-update`.
+
+Don't bump versions by hand. To preview what the next release would be:
+
+```bash
+python3 scripts/release_version.py
+```
+
+To force a release or a specific bump level, run the **Release** workflow
+manually from the Actions tab and choose `patch`, `minor` or `major`.
 
 ## License
 
