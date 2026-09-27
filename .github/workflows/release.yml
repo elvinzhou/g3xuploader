@@ -1,65 +1,107 @@
 name: Release
 
+# Every push to main is checked for releasable changes. The bump comes from
+# the Conventional Commit subjects since the last v* tag (see
+# scripts/release_version.py): feat → minor, fix/perf/refactor → patch,
+# "!" or BREAKING CHANGE → major, docs/chore/ci/test → no release.
+#
+# When a release is due, this workflow runs the tests, bumps the version with
+# bump-my-version (pyproject.toml, __init__.py, install.sh), pushes the bump
+# commit and tag to main, builds the .deb and publishes a GitHub Release.
+# The bump commit is pushed with GITHUB_TOKEN, which does not start another
+# workflow run.
+
 on:
   push:
     branches:
       - main
-    paths:
-      - 'src/avcardtool/__init__.py'
   workflow_dispatch:
+    inputs:
+      bump:
+        description: 'Version bump (auto = derive from commits since the last tag)'
+        type: choice
+        options: [auto, patch, minor, major]
+        default: auto
+
+# Releases must not overlap: each run tags on top of the previous one.
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
-  # ---------------------------------------------------------------------------
-  # Tag the commit, build .deb, and attach to GitHub Release
-  # ---------------------------------------------------------------------------
-  build-deb:
-    name: Build .deb (arm64)
+  release:
+    name: Version, build .deb (arm64), and release
     runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || !startsWith(github.event.head_commit.message, 'Bump version:')
     permissions:
-      contents: write  # needed to create tags and releases
+      contents: write  # push the bump commit and tag, create the release
 
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # needed so git tag push works correctly
-
-      - name: Read version
-        id: version
-        run: |
-          VERSION=$(python3 -c "import re; print(re.search(r'__version__ = \"([\d.]+)\"', open('src/avcardtool/__init__.py').read()).group(1))")
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
-
-      - name: Create and push tag
-        run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          if git rev-parse "${{ steps.version.outputs.tag }}" >/dev/null 2>&1; then
-            echo "Tag ${{ steps.version.outputs.tag }} already exists — skipping."
-          else
-            git tag "${{ steps.version.outputs.tag }}"
-            git push origin "${{ steps.version.outputs.tag }}"
-          fi
+          fetch-depth: 0     # full history and tags to find commits since the last release
+          fetch-tags: true
 
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
+      - name: Decide version bump
+        id: bump
+        env:
+          BUMP_OVERRIDE: ${{ inputs.bump || 'auto' }}
+        run: python3 scripts/release_version.py --override "$BUMP_OVERRIDE" --notes-file release_notes.md >> "$GITHUB_OUTPUT"
+
+      - name: Nothing to release
+        if: steps.bump.outputs.part == ''
+        run: echo "Only docs/chore/ci/test commits since the last tag — no release."
+
       - name: Install Poetry and dpkg tools
+        if: steps.bump.outputs.part != ''
         run: |
-          pip install poetry
+          pip install poetry bump-my-version==1.5.1
           sudo apt-get install -y dpkg-dev
 
+      - name: Run tests
+        if: steps.bump.outputs.part != ''
+        run: |
+          poetry install --no-interaction
+          poetry run pytest -q
+
+      - name: Bump version, commit, and tag
+        id: version
+        if: steps.bump.outputs.part != ''
+        env:
+          PART: ${{ steps.bump.outputs.part }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          bump-my-version bump "$PART"
+          VERSION=$(bump-my-version show current_version)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Push bump commit and tag
+        if: steps.bump.outputs.part != ''
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        # --atomic: if main moved on meanwhile, neither lands and the run
+        # fails; the run for the newer push then releases both changes.
+        run: git push --atomic origin HEAD:main "$TAG"
+
       - name: Build wheel
+        if: steps.bump.outputs.part != ''
         run: poetry build
 
       - name: Build .deb package
+        if: steps.bump.outputs.part != ''
         run: bash package_deb.sh
 
-      - name: Upload .deb to GitHub Release
+      - name: Publish GitHub Release
+        if: steps.bump.outputs.part != ''
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           name: ${{ steps.version.outputs.tag }}
+          body_path: release_notes.md
           files: dist/*.deb
-          generate_release_notes: true
