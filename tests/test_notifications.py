@@ -9,7 +9,7 @@ import pytest
 from avcardtool.core.config import Config, NotificationsConfig
 from avcardtool.notifications import BACKENDS, NotificationManager
 from avcardtool.notifications import events as ev
-from avcardtool.notifications.backends.email_smtp import EmailBackend
+from avcardtool.notifications.backends.email_smtp import EmailBackend, normalize_password
 from avcardtool.notifications.base import (
     NotificationBackend,
     NotificationEvent,
@@ -45,6 +45,34 @@ def make_event(severity=Severity.INFO, event_type="test"):
 # ============================================================================
 # EmailBackend
 # ============================================================================
+
+class TestNormalizePassword:
+
+    @pytest.mark.parametrize("given,expected", [
+        ("abcd efgh ijkl mnop", "abcdefghijklmnop"),      # as Google displays it
+        ("  abcd efgh ijkl mnop  ", "abcdefghijklmnop"),  # stray whitespace around a paste
+        ("abcd\u00a0efgh\u00a0ijkl\u00a0mnop", "abcdefghijklmnop"),  # non-breaking spaces from a web page
+        ("ABCD EFGH IJKL MNOP", "ABCDEFGHIJKLMNOP"),
+        ("abcdefghijklmnop", "abcdefghijklmnop"),         # already compact
+    ])
+    def test_app_password_spaces_removed(self, given, expected):
+        assert normalize_password(given) == expected
+
+    @pytest.mark.parametrize("password", [
+        "correct horse battery staple",  # passphrase with real spaces
+        "abcd efgh ijkl",                # wrong number of groups
+        "abc1 efgh ijkl mnop",           # digits aren't in app passwords
+        " secret ",                      # other providers: keep exactly as typed
+        "",
+    ])
+    def test_other_passwords_untouched(self, password):
+        assert normalize_password(password) == password
+
+    @mock.patch("avcardtool.notifications.backends.email_smtp.smtplib.SMTP")
+    def test_backend_logs_in_without_spaces(self, smtp_cls):
+        EmailBackend(email_config(password="abcd efgh ijkl mnop")).send(make_event())
+        smtp_cls.return_value.login.assert_called_once_with("user@example.com", "abcdefghijklmnop")
+
 
 class TestEmailBackend:
 

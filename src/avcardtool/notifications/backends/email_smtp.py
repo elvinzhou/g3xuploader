@@ -8,6 +8,7 @@ Stdlib only (smtplib/ssl/email). Connection security follows the config:
   - no TLS                       -> allowed only for localhost relays
 """
 
+import re
 import smtplib
 import ssl
 from email.message import EmailMessage
@@ -29,6 +30,19 @@ _SUBJECT_PREFIX = {
 
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
+# Google shows app passwords as four groups of four letters ("abcd efgh ijkl
+# mnop"); the spaces are display-only. Other providers' passwords may contain
+# real spaces, so only this exact shape is collapsed.
+_APP_PASSWORD_RE = re.compile(r"[A-Za-z]{4}(?:[ \u00a0]+[A-Za-z]{4}){3}")
+
+
+def normalize_password(password: str) -> str:
+    """Remove the display spaces from a Google app password; leave anything else as-is."""
+    stripped = password.strip()
+    if _APP_PASSWORD_RE.fullmatch(stripped):
+        return re.sub(r"[ \u00a0]+", "", stripped)
+    return password
+
 
 class EmailBackend(NotificationBackend):
     name = "email"
@@ -39,7 +53,7 @@ class EmailBackend(NotificationBackend):
         self.smtp_port = int(config.get("smtp_port", 587))
         self.use_tls = bool(config.get("use_tls", True))
         self.username = config.get("username", "")
-        self.password = config.get("password", "")
+        self.password = normalize_password(config.get("password", ""))
         self.from_addr = config.get("from_addr", "")
         to_addrs = config.get("to_addrs", [])
         if isinstance(to_addrs, str):

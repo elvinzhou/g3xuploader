@@ -3639,6 +3639,10 @@ def setup_wizard(ctx, config_path: Optional[Path]):
             default="", show_default=False
         )
         smtp_password = _prompt_password("  SMTP password: ") if smtp_username else ""
+        from avcardtool.notifications.backends.email_smtp import normalize_password
+        if normalize_password(smtp_password) != smtp_password:
+            smtp_password = normalize_password(smtp_password)
+            click.echo("  (Removed the spaces from the app password — they're not part of it.)")
         from_addr = click.prompt(
             "  From address",
             default=smtp_username if '@' in smtp_username else None
