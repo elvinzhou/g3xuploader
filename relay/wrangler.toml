@@ -1,0 +1,14 @@
+name = "flysto-auth-relay"
+main = "src/index.ts"
+compatibility_date = "2024-01-01"
+
+[vars]
+FLYSTO_CLIENT_ID = "YOUR_FLYSTO_CLIENT_ID"
+FLYSTO_BASE_URL = "https://www.flysto.net"
+RELAY_PUBLIC_URL = "https://auth.yourdomain.com"
+
+[[kv_namespaces]]
+binding = "AUTH_KV"
+id = "<KV_NAMESPACE_ID>"
+
+# Secret (never commit it):  wrangler secret put FLYSTO_CLIENT_SECRET

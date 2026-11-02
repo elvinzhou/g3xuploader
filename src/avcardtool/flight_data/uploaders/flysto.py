@@ -40,6 +40,13 @@ class FlyStoUploader(FlightDataUploader):
         client_secret: str - OAuth2 client secret
         redirect_uri: str - OAuth2 redirect URI (default: http://localhost:8080/callback)
         refresh_token: str - OAuth2 refresh token (obtained during initial setup)
+        auth_relay_url: str - ADVANCED. Base URL of an auth relay (see relay/).
+            Leave empty unless you know you need it. When set, login and token
+            refresh go through the relay, which holds the client secret, so
+            client_id/client_secret are not needed on this device (useful for
+            headless devices such as a Raspberry Pi). Flight logs are still
+            uploaded directly to FlySto and never pass through the relay.
+            Run `avcardtool flight flysto-login` to pair the device.
     """
 
     OAUTH_TOKEN_URL = "https://www.flysto.net/oauth/token"
@@ -57,6 +64,8 @@ class FlyStoUploader(FlightDataUploader):
         self.client_id = config.get('client_id', '')
         self.client_secret = config.get('client_secret', '')
         self.redirect_uri = config.get('redirect_uri', 'http://localhost:8080/callback')
+        # ADVANCED: optional auth relay; empty means the direct OAuth flow.
+        self.auth_relay_url = (config.get('auth_relay_url') or '').strip().rstrip('/')
 
         # Tokens - can be provided in config or loaded from token file
         self.access_token = config.get('access_token', '')
@@ -107,17 +116,24 @@ class FlyStoUploader(FlightDataUploader):
             return False
 
         try:
-            response = requests.post(
-                self.OAUTH_TOKEN_URL,
-                headers={'Content-Type': 'application/x-www-form-urlencoded'},
-                data={
-                    'grant_type': 'refresh_token',
-                    'client_id': self.client_id,
-                    'client_secret': self.client_secret,
-                    'refresh_token': self.refresh_token
-                },
-                timeout=30
-            )
+            if self.auth_relay_url:
+                response = requests.post(
+                    f"{self.auth_relay_url}/api/token/refresh",
+                    json={'refresh_token': self.refresh_token},
+                    timeout=30
+                )
+            else:
+                response = requests.post(
+                    self.OAUTH_TOKEN_URL,
+                    headers={'Content-Type': 'application/x-www-form-urlencoded'},
+                    data={
+                        'grant_type': 'refresh_token',
+                        'client_id': self.client_id,
+                        'client_secret': self.client_secret,
+                        'refresh_token': self.refresh_token
+                    },
+                    timeout=30
+                )
 
             if response.status_code == 200:
                 token_data = response.json()
@@ -153,7 +169,7 @@ class FlyStoUploader(FlightDataUploader):
         Returns:
             True if credentials are valid and we can obtain a valid access token
         """
-        if not self.client_id or not self.client_secret:
+        if not self.auth_relay_url and (not self.client_id or not self.client_secret):
             logger.error("FlySto client_id and client_secret not configured")
             return False
 
@@ -222,6 +238,66 @@ class FlyStoUploader(FlightDataUploader):
             logger.error(error_msg)
             return False, error_msg
 
+    def login_via_relay(self, timeout: int = 300, poll_interval: float = 2.0,
+                        echo=print) -> Tuple[bool, str]:
+        """
+        Pair this device through the auth relay (ADVANCED, auth_relay_url).
+
+        Starts a session on the relay, shows a link (and a QR code when the
+        optional `qrcode` package is installed), then polls until the user has
+        authorized FlySto in a browser on another device.
+
+        Returns:
+            Tuple of (success, message)
+        """
+        if not self.auth_relay_url:
+            return False, "auth_relay_url is not configured"
+
+        try:
+            response = requests.post(f"{self.auth_relay_url}/api/session/new", timeout=30)
+            response.raise_for_status()
+            session = response.json()
+            session_id = session['session_id']
+            auth_url = session['auth_url']
+        except Exception as e:
+            return False, f"Could not start relay session: {e}"
+
+        try:
+            import qrcode
+            qr = qrcode.QRCode(version=1, error_correction=qrcode.constants.ERROR_CORRECT_L,
+                               box_size=1, border=2)
+            qr.add_data(auth_url)
+            qr.make(fit=True)
+            qr.print_ascii(invert=True)
+        except ImportError:
+            pass
+        echo(f"\nOpen this link on your phone or laptop to authorize FlySto:\n{auth_url}\n")
+
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            time.sleep(poll_interval)
+            try:
+                poll = requests.get(f"{self.auth_relay_url}/api/session/poll",
+                                    params={'session_id': session_id}, timeout=30)
+            except requests.RequestException as e:
+                logger.debug(f"Relay poll error (will retry): {e}")
+                continue
+            if poll.status_code == 404:
+                return False, "Session expired. Please run login again."
+            if poll.status_code != 200:
+                continue
+            data = poll.json()
+            if data.get('status') == 'complete':
+                tokens = data.get('tokens', {})
+                self.access_token = tokens.get('access_token', '')
+                self.refresh_token = tokens.get('refresh_token', '')
+                self.token_expires_at = tokens.get('expires_at', time.time() + 3600) - 60
+                self._save_tokens()
+                return True, "Authorization complete! Device successfully linked."
+            if data.get('status') == 'expired':
+                return False, "Session expired. Please run login again."
+        return False, "Timed out waiting for authorization."
+
     def _build_zip_payload(self, flight_data: FlightData) -> bytes:
         """Build the ZIP payload that would be sent to FlySto."""
         with tempfile.NamedTemporaryFile(suffix='.zip', delete=False) as tmp_zip:
@@ -271,11 +347,18 @@ class FlyStoUploader(FlightDataUploader):
             except Exception as e:
                 logger.warning(f"[DEBUG] Could not build FlySto debug payload: {e}")
 
-        if not self.client_id or not self.client_secret:
+        if not self.auth_relay_url and (not self.client_id or not self.client_secret):
             return UploadResult(
                 success=False,
                 service=self.SERVICE_NAME,
                 message="FlySto client_id and client_secret not configured"
+            )
+
+        if not self.refresh_token and self.auth_relay_url:
+            return UploadResult(
+                success=False,
+                service=self.SERVICE_NAME,
+                message="FlySto not authorized. Run: avcardtool flight flysto-login"
             )
 
         if not self.refresh_token:
