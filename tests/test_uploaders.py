@@ -353,3 +353,24 @@ class TestUploaderIntegration:
             uploader = UploaderClass({'enabled': False})
             assert hasattr(uploader, 'upload_flight')
             assert hasattr(uploader, 'authenticate')
+
+
+class TestCarrydBaseUrl:
+    """base_url lets a test point Carryd uploads at a staging or local server."""
+
+    def _post_url(self, config, flight_data, summary):
+        from unittest.mock import patch, Mock
+        resp = Mock(status_code=200)
+        resp.json.return_value = {"success": True, "aircraft": {"totalTime": 1.0}}
+        with patch("avcardtool.flight_data.uploaders.carryd.requests.post", return_value=resp) as post:
+            CarrydUploader({"enabled": True, "api_key": "eal_x", **config}).upload_flight(flight_data, summary)
+        return post.call_args[0][0]
+
+    def test_defaults_to_carryd_app(self, sample_flight_data, sample_analysis_summary):
+        assert self._post_url({}, sample_flight_data, sample_analysis_summary) == \
+            "https://carryd.app/api/v1/flight-times"
+
+    def test_custom_base_url(self, sample_flight_data, sample_analysis_summary):
+        url = self._post_url({"base_url": "http://127.0.0.1:5173/"},
+                             sample_flight_data, sample_analysis_summary)
+        assert url == "http://127.0.0.1:5173/api/v1/flight-times"

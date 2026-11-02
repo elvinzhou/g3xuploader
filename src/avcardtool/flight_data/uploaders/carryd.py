@@ -33,6 +33,8 @@ class CarrydUploader(FlightDataUploader):
             when supplied; useful when multiple aircraft share a tail number.
         engine_logbooks: list[str] - Ordered list of engine logbook UUIDs.
             Index 0 is the primary engine. Omit to update only total time.
+        base_url: str - Carryd server (default https://carryd.app); point it
+            at a staging or local server to test without touching real data.
     """
 
     SERVICE_NAME = "Carryd"
@@ -42,6 +44,7 @@ class CarrydUploader(FlightDataUploader):
         self.api_key = config.get('api_key', '')
         self.aircraft_id: str = config.get('aircraft_id', '')
         self.engine_logbooks: list = config.get('engine_logbooks', [])
+        self.base_url: str = (config.get('base_url') or CARRYD_BASE_URL).rstrip('/')
 
     # def get_current_times(
     #     self,
@@ -202,7 +205,7 @@ class CarrydUploader(FlightDataUploader):
 
         try:
             response = requests.post(
-                f"{CARRYD_BASE_URL}/api/v1/flight-times",
+                f"{self.base_url}/api/v1/flight-times",
                 headers={
                     "Authorization": f"Bearer {self.api_key}",
                     "Content-Type": "application/json",
