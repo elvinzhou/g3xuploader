@@ -48,30 +48,40 @@ def make_event(severity=Severity.INFO, event_type="test"):
 
 class TestNormalizePassword:
 
-    @pytest.mark.parametrize("given,expected", [
-        ("abcd efgh ijkl mnop", "abcdefghijklmnop"),      # as Google displays it
-        ("  abcd efgh ijkl mnop  ", "abcdefghijklmnop"),  # stray whitespace around a paste
-        ("abcd\u00a0efgh\u00a0ijkl\u00a0mnop", "abcdefghijklmnop"),  # non-breaking spaces from a web page
-        ("ABCD EFGH IJKL MNOP", "ABCDEFGHIJKLMNOP"),
-        ("abcdefghijklmnop", "abcdefghijklmnop"),         # already compact
+    @pytest.mark.parametrize("host", [
+        "smtp.gmail.com", "SMTP.Gmail.com", "smtp.gmail.com.", "smtp-relay.gmail.com",
+        "smtp.googlemail.com", " smtp.gmail.com ",
     ])
-    def test_app_password_spaces_removed(self, given, expected):
-        assert normalize_password(given) == expected
+    def test_gmail_hosts(self, host):
+        assert normalize_password("abcd efgh ijkl mnop", host) == "abcdefghijklmnop"
 
-    @pytest.mark.parametrize("password", [
-        "correct horse battery staple",  # passphrase with real spaces
-        "abcd efgh ijkl",                # wrong number of groups
-        "abc1 efgh ijkl mnop",           # digits aren't in app passwords
-        " secret ",                      # other providers: keep exactly as typed
-        "",
+    @pytest.mark.parametrize("given", [
+        "abcd efgh ijkl mnop",                      # as Google displays it
+        "  abcd efgh ijkl mnop  ",                  # stray whitespace around a paste
+        "abcd\u00a0efgh\u00a0ijkl\u00a0mnop",       # non-breaking spaces from a web page
+        "abcdefghijklmnop",                         # already compact
     ])
-    def test_other_passwords_untouched(self, password):
-        assert normalize_password(password) == password
+    def test_gmail_spaces_removed(self, given):
+        assert normalize_password(given, "smtp.gmail.com") == "abcdefghijklmnop"
+
+    @pytest.mark.parametrize("host", [
+        "smtp.office365.com", "smtp.fastmail.com", "localhost", "",
+        "notgmail.com", "smtp.gmail.com.example.net",   # look-alikes aren't Google
+    ])
+    def test_other_servers_untouched(self, host):
+        for password in ("correct horse battery staple", "abcd efgh ijkl mnop", " secret "):
+            assert normalize_password(password, host) == password
 
     @mock.patch("avcardtool.notifications.backends.email_smtp.smtplib.SMTP")
-    def test_backend_logs_in_without_spaces(self, smtp_cls):
-        EmailBackend(email_config(password="abcd efgh ijkl mnop")).send(make_event())
+    def test_backend_strips_for_gmail(self, smtp_cls):
+        EmailBackend(email_config(smtp_host="smtp.gmail.com",
+                                  password="abcd efgh ijkl mnop")).send(make_event())
         smtp_cls.return_value.login.assert_called_once_with("user@example.com", "abcdefghijklmnop")
+
+    @mock.patch("avcardtool.notifications.backends.email_smtp.smtplib.SMTP")
+    def test_backend_keeps_spaces_elsewhere(self, smtp_cls):
+        EmailBackend(email_config(password="correct horse battery staple")).send(make_event())
+        smtp_cls.return_value.login.assert_called_once_with("user@example.com", "correct horse battery staple")
 
 
 class TestEmailBackend:
