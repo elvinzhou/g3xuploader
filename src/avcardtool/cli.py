@@ -3949,15 +3949,18 @@ def notify_test(ctx):
     '--version',
     default=None,
     metavar='VERSION',
-    help='Install a specific version (e.g. 1.2.0). Defaults to latest.'
+    help='Install a specific version (e.g. 1.2.0), even if it is not newer. '
+         'Defaults to the latest release, installed only if newer than this one.'
 )
 @click.pass_context
 def self_update(ctx, version: Optional[str]):
     """
-    Update avcardtool to the latest version from GitHub.
+    Update avcardtool to the latest release from GitHub, if it is newer.
 
-    Automatically re-runs with sudo if not already root, so that udev rules
-    and systemd service files are updated alongside the Python package.
+    Checks the latest GitHub release first and does nothing when this
+    install is already at (or ahead of) it. Otherwise re-runs with sudo if
+    not already root, so that udev rules and systemd service files are
+    updated alongside the Python package.
 
     Examples:
         avcardtool self-update
@@ -3966,27 +3969,32 @@ def self_update(ctx, version: Optional[str]):
     import re
     import subprocess
 
+    # Development (editable) install: the developer manages the code via git,
+    # so skip the release check and pip upgrade, but still refresh system
+    # files (below, as root) so udev rules and systemd units stay current.
+    dev_path = _editable_install_path()
+
+    if not dev_path and version is None:
+        try:
+            latest = _latest_release_version()
+        except Exception as e:
+            click.echo(f"Could not check for updates: {e}", err=True)
+            sys.exit(1)
+        if _version_tuple(latest) <= _version_tuple(__version__):
+            click.echo(f"Already up to date (v{__version__}; latest release is v{latest}).")
+            return
+        click.echo(f"New release available: v{latest} (installed: v{__version__})")
+        version = latest
+
     if os.geteuid() != 0:
         args = ['sudo', sys.argv[0], 'self-update']
         if version:
+            # Pass the resolved version so the root run doesn't re-check
             args += ['--version', version]
         os.execvp('sudo', args)
         # execvp replaces the current process; this line is unreachable
 
     click.echo(f"Current version: v{__version__}")
-
-    # Check whether this is a development (editable) install.  If so, skip
-    # the pip upgrade — the developer manages the code via git — but still
-    # refresh system files so udev rules and systemd units stay current.
-    pip_show = subprocess.run(
-        [sys.executable, '-m', 'pip', 'show', 'avcardtool'],
-        capture_output=True, text=True
-    )
-    dev_path = None
-    for line in pip_show.stdout.splitlines():
-        if line.lower().startswith('editable project location'):
-            dev_path = line.split(':', 1)[1].strip()
-            break
 
     if dev_path:
         click.echo(f"Development install ({dev_path}) — skipping pip upgrade.")
@@ -3994,11 +4002,8 @@ def self_update(ctx, version: Optional[str]):
         _update_system_files(ctx, None)
         return
 
-    repo = "git+https://github.com/elvinzhou/g3xuploader.git"
-    package = f"{repo}@v{version}" if version else repo
-    target = f"v{version}" if version else "latest"
-
-    click.echo(f"Updating avcardtool to {target}...")
+    package = f"git+https://github.com/elvinzhou/g3xuploader.git@v{version}"
+    click.echo(f"Updating avcardtool to v{version}...")
 
     # Run pip. On Debian/Raspberry Pi OS with Python 3.11+ (PEP 668), pip
     # refuses to install into the system environment without the
@@ -4016,27 +4021,51 @@ def self_update(ctx, version: Optional[str]):
         click.echo(f"Update failed:\n{result.stderr.strip()}", err=True)
         sys.exit(1)
 
-    # pip prints "Successfully installed avcardtool-X.Y.Z" when something changed,
-    # or "Requirement already satisfied" when already at the latest version.
     installed_match = re.search(r'Successfully installed avcardtool-([\d.]+)', result.stdout)
-    already_satisfied = 'already satisfied' in result.stdout.lower()
-
-    if installed_match:
-        new_version = installed_match.group(1)
-        click.echo(f"Updated to v{new_version}.")
-    elif version:
-        # Pinned version install that pip didn't report as a new install
-        new_version = version
-        click.echo(f"Installed v{new_version}.")
-    else:
-        new_version = None
-        if already_satisfied:
-            click.echo(f"Already up to date (v{__version__}).")
-            _update_system_files(ctx, None)
-            return
-        click.echo("Update complete.")
+    new_version = installed_match.group(1) if installed_match else version
+    click.echo(f"Installed v{new_version}.")
 
     _update_system_files(ctx, new_version)
+
+
+_RELEASES_LATEST_URL = "https://api.github.com/repos/elvinzhou/g3xuploader/releases/latest"
+
+
+def _latest_release_version() -> str:
+    """Version of the latest published GitHub release, e.g. '1.9.3'."""
+    import re
+    import requests
+
+    resp = requests.get(
+        _RELEASES_LATEST_URL,
+        headers={"Accept": "application/vnd.github+json"},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    tag = resp.json().get("tag_name", "")
+    m = re.fullmatch(r"v?(\d+(?:\.\d+)*)", tag)
+    if not m:
+        raise RuntimeError(f"unexpected release tag {tag!r}")
+    return m.group(1)
+
+
+def _version_tuple(v: str) -> tuple:
+    """'1.10.2' -> (1, 10, 2), so versions compare numerically, not as text."""
+    return tuple(int(part) for part in v.split("."))
+
+
+def _editable_install_path() -> Optional[str]:
+    """Source directory of an editable (pip install -e) install, else None."""
+    import subprocess
+
+    pip_show = subprocess.run(
+        [sys.executable, '-m', 'pip', 'show', 'avcardtool'],
+        capture_output=True, text=True
+    )
+    for line in pip_show.stdout.splitlines():
+        if line.lower().startswith('editable project location'):
+            return line.split(':', 1)[1].strip()
+    return None
 
 
 def _update_system_files(ctx: click.Context, version: Optional[str]) -> None:
