@@ -17,7 +17,7 @@ Download flow:
     1. list_aircraft()                       → pick device + series + issue
     2. list_files(series_id, issue_name)     → get download URLs
     3. unlock(series_id, issue_name,         → authorise download for this device
-              device_id, card_serial)
+              device_id)
     4. download_file(db_file, output_dir)    → fetch bytes
 """
 
