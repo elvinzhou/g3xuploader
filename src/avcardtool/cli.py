@@ -1202,6 +1202,11 @@ def navdata_download(ctx, aircraft: int, device: Optional[int], series: Optional
 
         # No batch-update session: POST /batch-updates/ returned 500 every
         # time, and direct unlock (the fallback it always ended up on) works.
+
+        # Avionics types of this aircraft's displays: TAW files for any other
+        # family in a subscription (e.g. G600, X3) are skipped before download.
+        device_type_map, primary_db_type = _build_device_type_map(api, [d for d, _, _, _ in plan])
+        wanted_db_types = set(device_type_map.values()) or None
         # ---------------------------------------------------------------
         # Step 2: for each entry unlock, fetch file list, and download
         # ---------------------------------------------------------------
@@ -1212,7 +1217,19 @@ def navdata_download(ctx, aircraft: int, device: Optional[int], series: Optional
             expiry = (target.invalid_at or "no expiry")[:10]
             click.echo(f"\n  {avdb.name}  device={dev.name}  series={s.series_id}  issue={target.name} (expires {expiry})")
 
-            # Unlock with BatchUpdate auth if we have a session
+            # Fetch file list (doesn't need the unlock), and drop files for
+            # avionics that aren't in this aircraft before unlocking anything.
+            issue_files = api.list_files(s.series_id, target.name)
+            all_files = issue_files.main_files + issue_files.auxiliary_files
+            if not all_files:
+                click.echo("    No files found for this issue.")
+                continue
+            all_files = _keep_files_for_avionics(
+                api, all_files, wanted_db_types, lambda m: click.echo(f"    {m}"))
+            if not all_files:
+                click.echo("    Nothing here for this aircraft's avionics — skipped.")
+                continue
+
             unlock_codes = []
             try:
                 unlock_resp = api.unlock(s.series_id, target.name, dev.device_id)
@@ -1220,13 +1237,6 @@ def navdata_download(ctx, aircraft: int, device: Optional[int], series: Optional
                 click.echo("    Unlocked.")
             except Exception as e:
                 click.echo(f"    Warning: unlock failed ({e}) — attempting download anyway.")
-
-            # Fetch file list
-            issue_files = api.list_files(s.series_id, target.name)
-            all_files = issue_files.main_files + issue_files.auxiliary_files
-            if not all_files:
-                click.echo("    No files found for this issue.")
-                continue
 
             series_dir = output_dir / avdb.name.replace(" ", "_") / target.name
             for db_file in all_files:
@@ -1277,44 +1287,6 @@ def navdata_download(ctx, aircraft: int, device: Optional[int], series: Optional
                 for dev, _, _, _ in plan
                 if dev.system_id_raw is not None
             })
-            # Determine the target avionics database_type via the /device-models/ API.
-            # Each device model has a productID that equals the TAW header database_type
-            # (= feat_unlk security_id).  Match the device name(s) in our plan against
-            # the device-models list to get the authoritative productID.
-            # Fall back to frequency heuristic if the API call fails or finds no match.
-            primary_db_type = None
-            device_type_map: dict = {}  # name → productID, for all devices in this plan
-            plan_devices = list({id(dev): dev for dev, _, _, _ in plan if dev.name}.values())
-            # First: use productID directly from the device object if the API returned it
-            for dev in plan_devices:
-                if dev.product_id is not None:
-                    device_type_map[dev.name] = dev.product_id
-                    if primary_db_type is None:
-                        primary_db_type = dev.product_id
-                    click.echo(f"Device model '{dev.name}' → productID={dev.product_id} (0x{dev.product_id:04X})")
-            # Second: for devices still missing, cross-reference /device-models/ by name
-            unresolved_names = [dev.name for dev in plan_devices if dev.name not in device_type_map]
-            if unresolved_names:
-                try:
-                    device_models = api.list_device_models()
-                    model_map = {
-                        m["name"].lower(): m["productID"]
-                        for m in device_models
-                        if m.get("name") and m.get("productID") is not None
-                    }
-                    for dname in unresolved_names:
-                        product_id = model_map.get(dname.lower())
-                        if product_id is not None:
-                            device_type_map[dname] = product_id
-                            if primary_db_type is None:
-                                primary_db_type = product_id
-                            click.echo(f"Device model '{dname}' → productID={product_id} (0x{product_id:04X})")
-                    still_unresolved = [n for n in unresolved_names if n not in device_type_map]
-                    if still_unresolved:
-                        click.echo(f"Warning: device name(s) {still_unresolved!r} not found in /device-models/ — falling back to frequency heuristic")
-                except Exception as e:
-                    click.echo(f"Warning: /device-models/ lookup failed ({e}) — falling back to frequency heuristic")
-
             if primary_db_type is None:
                 from collections import Counter
                 db_type_counts = Counter(
@@ -1594,6 +1566,67 @@ def _on_display(entry: dict, descriptions: list) -> bool:
     return bool(issue) and any(
         d.split()[-1] == issue and keyword in d.lower() for d in descriptions
     )
+
+
+def _build_device_type_map(api, devices: list) -> tuple:
+    """
+    Map each device name to its avionics productID (= TAW header
+    database_type = feat_unlk security_id), using the productID on the
+    device itself, else /device-models/ by name.
+
+    Returns (device_type_map, primary_db_type).
+    """
+    primary_db_type = None
+    device_type_map: dict = {}  # name → productID, for all devices given
+    plan_devices = list({id(dev): dev for dev in devices if dev.name}.values())
+    # First: use productID directly from the device object if the API returned it
+    for dev in plan_devices:
+        if dev.product_id is not None:
+            device_type_map[dev.name] = dev.product_id
+            if primary_db_type is None:
+                primary_db_type = dev.product_id
+            click.echo(f"Device model '{dev.name}' → productID={dev.product_id} (0x{dev.product_id:04X})")
+    # Second: for devices still missing, cross-reference /device-models/ by name
+    unresolved_names = [dev.name for dev in plan_devices if dev.name not in device_type_map]
+    if unresolved_names:
+        try:
+            device_models = api.list_device_models()
+            model_map = {
+                m["name"].lower(): m["productID"]
+                for m in device_models
+                if m.get("name") and m.get("productID") is not None
+            }
+            for dname in unresolved_names:
+                product_id = model_map.get(dname.lower())
+                if product_id is not None:
+                    device_type_map[dname] = product_id
+                    if primary_db_type is None:
+                        primary_db_type = product_id
+                    click.echo(f"Device model '{dname}' → productID={product_id} (0x{product_id:04X})")
+            still_unresolved = [n for n in unresolved_names if n not in device_type_map]
+            if still_unresolved:
+                click.echo(f"Warning: device name(s) {still_unresolved!r} not found in /device-models/ — falling back to frequency heuristic")
+        except Exception as e:
+            click.echo(f"Warning: /device-models/ lookup failed ({e}) — falling back to frequency heuristic")
+    return device_type_map, primary_db_type
+
+
+def _keep_files_for_avionics(api, files: list, wanted: Optional[set], echo) -> list:
+    """
+    Drop .taw files whose avionics type isn't in *wanted*, reading each
+    TAW's header from its first few KiB (no full download). Files whose
+    type can't be read, and non-TAW files, are kept. wanted=None keeps all.
+    """
+    if not wanted:
+        return list(files)
+    keep = []
+    for f in files:
+        db_type = api.peek_taw_database_type(f)
+        if db_type is not None and db_type not in wanted:
+            echo(f"Skipping {f.file_name}: for other avionics (db_type 0x{db_type:04X})")
+            continue
+        keep.append(f)
+    return keep
 
 
 def _system_id_for_card(manifest: dict, entries: list) -> int:
@@ -2408,7 +2441,7 @@ def navdata_auto_update(ctx, device: Optional[Path]):
             _report_navdata_dry_run(
                 _log, notify_manager, plan, already_current, mount,
                 data_dir / "navdata" / "cache", card_serial, target_dev.name,
-                ac.tail_number,
+                ac.tail_number, target_db_type,
             )
             continue
 
@@ -2444,7 +2477,7 @@ def navdata_auto_update(ctx, device: Optional[Path]):
             # families that share the same avdb name and cycle (e.g. GTN series
             # 2230 vs G3X series 2239 both named "Navigation Data/2603") get
             # separate cache slots and don't serve each other's TAW files.
-            cache_key = f"{s.series_id}/{issue.name}"
+            cache_key = _dl_cache_key(s.series_id, issue.name, target_db_type)
             issue_cache_dir = cache_dir / str(s.series_id) / issue.name
 
             # --- Acquire download slot ---
@@ -2497,14 +2530,8 @@ def navdata_auto_update(ctx, device: Optional[Path]):
                     })
                 continue
 
-            # slot == "mine" — download now
-            try:
-                api.unlock(s.series_id, issue.name, target_dev.device_id)
-            except Exception as e:
-                msg = f"Unlock failed for {cache_key}: {e}"
-                _log.warning(f"  {msg}")
-                issues.append(("WARNING", msg))
-
+            # slot == "mine" — download now. List files first (no unlock
+            # needed) and keep only this card's avionics before unlocking.
             try:
                 issue_files = api.list_files(s.series_id, issue.name)
             except Exception as e:
@@ -2514,9 +2541,26 @@ def navdata_auto_update(ctx, device: Optional[Path]):
                 _release_dl_slot(cache_dir, cache_key, [], {}, [], avdb.type_id, s.series_id, success=False)
                 continue
 
+            card_files = _keep_files_for_avionics(
+                api, issue_files.main_files + issue_files.auxiliary_files,
+                {target_db_type}, lambda m: _log.info(f"  {m}"))
+            if not card_files:
+                _log.info(f"  {cache_key}: nothing for this card's avionics — skipped")
+                # Nothing to fetch for this card; record it so later runs don't retry
+                _release_dl_slot(cache_dir, cache_key, [], {}, issue_files.removable_paths,
+                                 avdb.type_id, s.series_id, success=True)
+                continue
+
+            try:
+                api.unlock(s.series_id, issue.name, target_dev.device_id)
+            except Exception as e:
+                msg = f"Unlock failed for {cache_key}: {e}"
+                _log.warning(f"  {msg}")
+                issues.append(("WARNING", msg))
+
             downloaded: list = []
             file_entries: list = []
-            for db_file in issue_files.main_files + issue_files.auxiliary_files:
+            for db_file in card_files:
                 try:
                     dest = api.download_file(db_file, issue_cache_dir)
                     _log.info(f"  Downloaded {dest.name} ({dest.stat().st_size:,} bytes)")
@@ -2663,9 +2707,22 @@ def navdata_auto_update(ctx, device: Optional[Path]):
             _log.warning(f"Could not unmount {mount_point}: {e}")
 
 
+def _dl_cache_key(series_id: int, issue_name: str, db_type: Optional[int]) -> str:
+    """
+    Download-cache key for one series/issue as fetched for one avionics type.
+
+    A series' file list can hold TAWs for several avionics families and only
+    the card's own are downloaded, so the cached file list is per avionics
+    type. (Files themselves live in the shared cache/<series>/<issue>/ dir.)
+    """
+    key = f"{series_id}/{issue_name}"
+    return f"{key}@{db_type:04X}" if db_type is not None else key
+
+
 def _report_navdata_dry_run(
     _log, notify_manager, plan: list, already_current: list, mount: Path,
     cache_dir: Path, card_serial: str, avionics: str, aircraft: Optional[str],
+    target_db_type: Optional[int] = None,
 ) -> None:
     """
     Report what navdata auto-update would install on one card, without
@@ -2689,7 +2746,7 @@ def _report_navdata_dry_run(
             continue
         seen.add(key)
 
-        cache_key = f"{s.series_id}/{issue.name}"
+        cache_key = _dl_cache_key(s.series_id, issue.name, target_db_type)
         cached = dl_state.get(cache_key, {})
         feat_name = _AVDB_TO_FEAT_UNLK.get(avdb.name)
         if (cached.get("status") == "complete"
@@ -3111,7 +3168,7 @@ def navdata_update(ctx, device: Optional[Path], aircraft: int, yes: bool):
         crc_confirmed: dict = {}  # avdb.name -> issue.name for CRC-matched items
 
         for avdb, s, issue, installed_issue, reason, files, removable, size in plan_details:
-            dl_cache_key = f"{s.series_id}/{issue.name}"
+            dl_cache_key = _dl_cache_key(s.series_id, issue.name, target_db_type)
             issue_cache_dir = cache_dir / str(s.series_id) / issue.name
 
             click.echo(f"\n  {avdb.name}  →  {issue.name}")
@@ -3160,13 +3217,8 @@ def navdata_update(ctx, device: Optional[Path], aircraft: int, yes: bool):
                     })
                 continue
 
-            # slot == "mine" — download now
-            try:
-                api.unlock(s.series_id, issue.name, target_dev.device_id)
-                click.echo("    Unlocked.")
-            except Exception as e:
-                click.echo(f"    Warning: unlock failed ({e}) — attempting download anyway.", err=True)
-
+            # slot == "mine" — download now. Get the file list and keep only
+            # this card's avionics before unlocking.
             dl_files = files
             dl_removable = removable
             if not dl_files:
@@ -3178,6 +3230,20 @@ def navdata_update(ctx, device: Optional[Path], aircraft: int, yes: bool):
                     click.echo(f"    Error: could not get file list: {e}", err=True)
                     _release_dl_slot(cache_dir, dl_cache_key, [], {}, [], avdb.type_id, s.series_id, success=False)
                     continue
+
+            dl_files = _keep_files_for_avionics(
+                api, dl_files, {target_db_type}, lambda m: click.echo(f"    {m}"))
+            if not dl_files:
+                click.echo("    Nothing here for this card's avionics — skipped.")
+                _release_dl_slot(cache_dir, dl_cache_key, [], {}, dl_removable,
+                                 avdb.type_id, s.series_id, success=True)
+                continue
+
+            try:
+                api.unlock(s.series_id, issue.name, target_dev.device_id)
+                click.echo("    Unlocked.")
+            except Exception as e:
+                click.echo(f"    Warning: unlock failed ({e}) — attempting download anyway.", err=True)
 
             downloaded: list = []
             file_entries: list = []

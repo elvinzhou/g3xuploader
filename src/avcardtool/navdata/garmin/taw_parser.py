@@ -320,6 +320,24 @@ class TAWParser:
         except Exception as e:
             raise TAWParseError(f"Failed to parse {filepath}: {e}")
 
+    def parse_header_bytes(self, data: bytes) -> "TAWHeader":
+        """
+        Parse just the header from the first bytes of a TAW file — enough to
+        learn its avionics type (database_type) without the whole file.
+        A few hundred bytes suffice; 4 KiB leaves plenty of room.
+
+        Raises:
+            TAWParseError: if the bytes aren't a TAW header (or are too short)
+        """
+        import io
+        try:
+            _, header = self._parse_header(io.BytesIO(data))
+        except TAWParseError:
+            raise
+        except Exception as e:
+            raise TAWParseError(f"Failed to parse TAW header: {e}")
+        return header
+
     def _parse_header(self, f: BinaryIO) -> tuple:
         """Parse the TAW file header; returns (magic_bytes, TAWHeader)."""
         # ---- 5-byte magic ----

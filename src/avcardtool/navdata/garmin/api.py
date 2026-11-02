@@ -461,6 +461,44 @@ class FlyGarminAPI:
             logger.debug(f"HEAD {url} failed: {e}")
             return None
 
+    TAW_HEADER_PEEK_BYTES = 4096
+
+    def peek_taw_database_type(self, db_file: DatabaseFile) -> Optional[int]:
+        """
+        Avionics type (TAW header database_type) of a .taw file, read from
+        its first few KiB instead of downloading the whole file.
+
+        A subscription's file list can include TAWs for other avionics
+        families (e.g. G600 'bdg600-*' files for a GTN); this lets callers
+        skip those before unlocking or downloading. Returns None for
+        non-TAW files or if the header can't be read, so callers should
+        treat None as "keep".
+        """
+        if not db_file.file_name.lower().endswith(".taw"):
+            return None
+        from avcardtool.navdata.garmin.taw_parser import TAWParser
+        try:
+            resp = self._session.get(
+                db_file.url,
+                headers={"Range": f"bytes=0-{self.TAW_HEADER_PEEK_BYTES - 1}"},
+                stream=True,
+                timeout=30,
+            )
+            try:
+                resp.raise_for_status()
+                # Read at most the peek size, even if the server ignored Range
+                data = b""
+                for chunk in resp.iter_content(chunk_size=self.TAW_HEADER_PEEK_BYTES):
+                    data += chunk
+                    if len(data) >= self.TAW_HEADER_PEEK_BYTES:
+                        break
+            finally:
+                resp.close()
+            return TAWParser().parse_header_bytes(data[:self.TAW_HEADER_PEEK_BYTES]).database_type
+        except Exception as e:
+            logger.debug(f"Could not read TAW header of {db_file.file_name}: {e}")
+            return None
+
     def download_file(
         self,
         db_file: DatabaseFile,
