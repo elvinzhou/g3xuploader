@@ -3436,26 +3436,17 @@ def setup_wizard(ctx, config_path: Optional[Path]):
         )
         engine_time_cfg.mode = tach_mode
 
-        click.echo(
-            "  Use the values from your avionics' Engine Time setup (on a G3X:\n"
-            "  Engine/Airframe configuration → Engine Time) so avcardtool's tach\n"
-            "  matches the engine hours the avionics records."
-        )
         if tach_mode == 'variable':
+            click.echo(
+                "  Tach is estimated from RPM; whenever the avionics has recorded its\n"
+                "  own engine hours, that value is used instead. For the closest\n"
+                "  estimate, use the avionics' Standard Recording RPM (on a G3X:\n"
+                "  Engine/Airframe configuration → Engine Time)."
+            )
             engine_time_cfg.reference_rpm = click.prompt(
                 "  Standard Recording RPM (1 tach hour per hour at this RPM — not redline)",
                 default=engine_time_cfg.reference_rpm, type=int,
             )
-        engine_time_cfg.minimum_recording_rpm = click.prompt(
-            "  Minimum Recording RPM (engine time only counts above this)",
-            default=engine_time_cfg.minimum_recording_rpm, type=int,
-        )
-        if tach_mode == 'variable':
-            max_rpm = click.prompt(
-                "  Maximum Recording RPM (caps spurious readings; 0 = no cap)",
-                default=engine_time_cfg.maximum_recording_rpm or 0, type=int,
-            )
-            engine_time_cfg.maximum_recording_rpm = max_rpm or None
 
         # --- Upload services ---
         click.echo("\n  Upload Services:")

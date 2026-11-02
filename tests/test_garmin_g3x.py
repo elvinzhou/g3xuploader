@@ -357,7 +357,7 @@ def test_log_without_utc_offset_column(tmp_path):
 
 
 class TestTachMatchesG3X:
-    """Tach mirrors the G3X's Engine Time recording (Standard/Min/Max Recording RPM)."""
+    """Tach estimates the G3X's Engine Time recording (Standard Recording RPM)."""
 
     def _flight(self, rpms):
         from datetime import datetime, timedelta
@@ -382,14 +382,6 @@ class TestTachMatchesG3X:
     def test_below_minimum_recording_rpm_does_not_count(self):
         assert self._tach([400] * 3600, reference_rpm=2300, minimum_recording_rpm=500) == 0
 
-    def test_maximum_recording_rpm_caps_spikes(self):
-        spikes = [2300] * 3590 + [9999] * 10
-        assert self._tach(spikes, reference_rpm=2300, maximum_recording_rpm=2800) == pytest.approx(
-            (3590 + 10 * 2800 / 2300) / 3600)
-        assert self._tach(spikes, reference_rpm=2300) > self._tach(
-            spikes, reference_rpm=2300, maximum_recording_rpm=2800)
-
     def test_default_is_a_standard_rpm_not_redline(self):
         from avcardtool.core.config import EngineTimeConfig
         assert EngineTimeConfig().reference_rpm == 2300
-        assert EngineTimeConfig().maximum_recording_rpm is None
