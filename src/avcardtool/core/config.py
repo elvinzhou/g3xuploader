@@ -18,15 +18,22 @@ logger = logging.getLogger(__name__)
 @dataclass
 class EngineTimeConfig:
     """
-    Engine Time (Tach Time) Configuration
+    Engine Time (Tach Time) Configuration — mirrors the G3X's Engine Time
+    setup so avcardtool's tach matches what the avionics records.
 
-    mode: "variable" or "fixed"
+    mode: "variable" or "fixed" (the G3X's Record Mode)
     - variable: Time accrues at (RPM / reference_rpm) rate
     - fixed: Time accrues at 1:1 with clock when RPM > minimum_recording_rpm
+    reference_rpm: the G3X's Standard Recording RPM — 1 tach hour per hour at
+        this RPM. Not redline: setting it to redline makes tach run low.
+    minimum_recording_rpm: the G3X's Minimum Recording RPM.
+    maximum_recording_rpm: the G3X's Maximum Recording RPM — readings above it
+        are capped at it. None = no cap.
     """
     mode: str = "variable"
     minimum_recording_rpm: int = 500
-    reference_rpm: int = 2700
+    reference_rpm: int = 2300   # the G3X manual's example Standard Recording RPM
+    maximum_recording_rpm: Optional[int] = None
 
 
 @dataclass

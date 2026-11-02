@@ -26,11 +26,15 @@ class TachCalculator:
     """
     Calculates Tach (engine) time.
 
-    Supports two modes:
-    - variable: Time accrues at (RPM / reference_rpm) rate
-      Example: At 2700 RPM with reference 2700: 1 hour flight = 1.0 tach hour
-               At 2400 RPM with reference 2700: 1 hour flight = 0.89 tach hour
+    Mirrors the G3X's Engine Time recording, so the result matches the
+    engine hours the avionics writes in each log header:
+    - variable: Time accrues at (RPM / reference_rpm) rate, where
+      reference_rpm is the G3X's Standard Recording RPM
+      Example: At 2300 RPM with reference 2300: 1 hour flight = 1.0 tach hour
+               At 2100 RPM with reference 2300: 1 hour flight = 0.91 tach hour
     - fixed: Time accrues at 1:1 when RPM > minimum_recording_rpm
+    RPM readings above maximum_recording_rpm (if set) are capped at it, as
+    the G3X does, so a spurious spike can't inflate tach.
     """
 
     def __init__(self, config: EngineTimeConfig):
@@ -65,9 +69,12 @@ class TachCalculator:
         else:  # variable mode
             # Variable mode: time accrues at (RPM / reference_rpm) rate
             reference_rpm = self.config.reference_rpm or 1
+            max_rpm = getattr(self.config, "maximum_recording_rpm", None)
             for data_point in flight_data.data_points:
                 rpm = data_point.rpm or 0
                 if rpm >= self.config.minimum_recording_rpm:
+                    if max_rpm:
+                        rpm = min(rpm, max_rpm)
                     rate = rpm / reference_rpm
                     recording_seconds += rate
 

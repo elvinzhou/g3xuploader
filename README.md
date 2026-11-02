@@ -67,8 +67,10 @@ If enabled, avcardtool will parse G3X flight logs, calculate Hobbs and Tach time
 | Prompt | Options | Default | Description |
 |--------|---------|---------|-------------|
 | Hobbs time trigger | `oil_pressure`, `rpm`, `flight_time` | `oil_pressure` | What starts the Hobbs clock — oil pressure is most common for certified aircraft |
-| Tach time mode | `variable`, `fixed` | `variable` | `variable` accrues time at the RPM/redline ratio; `fixed` runs 1:1 with the clock whenever the engine is running |
-| Engine redline RPM | integer | `2700` | Only shown for `variable` mode — used as the denominator for tach ratio |
+| Tach time mode | `variable`, `fixed` | `variable` | The G3X's Engine Time *Record Mode*. `variable` accrues time at RPM ÷ Standard Recording RPM; `fixed` runs 1:1 with the clock whenever the engine is above the minimum RPM |
+| Standard Recording RPM | integer | `2300` | `variable` mode only. The RPM at which 1 tach hour accrues per hour — copy it from the G3X's Engine Time setup. **Not redline**: using redline makes tach run low (about 15% on a real G3X's logs) |
+| Minimum Recording RPM | integer | `500` | Engine time only counts above this RPM |
+| Maximum Recording RPM | integer | none | `variable` mode only. RPM readings above it are capped, like the G3X, so a spurious spike can't inflate tach. `0` for no cap |
 
 **Upload services** (only shown if flight processing is enabled):
 
