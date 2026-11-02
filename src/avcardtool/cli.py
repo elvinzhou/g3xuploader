@@ -1586,6 +1586,32 @@ def _link_or_copy(src: Path, dst: Path) -> None:
         _shutil.copy2(src, dst)
 
 
+def _filter_entries_for_avionics(entries: list, target_db_type: int) -> tuple:
+    """
+    Split manifest entries into (for this card's avionics, for other avionics).
+
+    A device's subscription can include TAW files for other avionics families
+    (e.g. a GTN's series also serving G600 'bdg600-*' obstacle files). Keep:
+      * TAW files whose header database_type matches the card's avionics;
+      * other files (.jnx/.hif charts and rasters, or a TAW whose type could
+        not be read) only if they belong to a device that has at least one
+        matching TAW file.
+    """
+    matching_devices = {
+        e.get("device_id") for e in entries
+        if e.get("taw_database_type") == target_db_type
+    }
+    keep, skip = [], []
+    for e in entries:
+        db_type = e.get("taw_database_type")
+        if db_type is not None:
+            ok = db_type == target_db_type
+        else:
+            ok = e.get("device_id") in matching_devices
+        (keep if ok else skip).append(e)
+    return keep, skip
+
+
 def _resolve_target_db_type(sd_card: Path, manifest: dict) -> Optional[int]:
     """
     Determine which avionics database_type (= TAW database_type = feat_unlk security_id)
@@ -1734,6 +1760,45 @@ def navdata_install(ctx, sd_card: Optional[Path], from_dir: Optional[Path], yes:
         sys.exit(1)
 
     # ---------------------------------------------------------------
+    # Which avionics is this card for? Only its databases get installed.
+    # ---------------------------------------------------------------
+    click.echo("\nResolving target avionics type...")
+    target_db_type: Optional[int] = _resolve_target_db_type(sd_card, manifest)
+    if target_db_type is None:
+        device_type_map = manifest.get("device_type_map", {})
+        if device_type_map:
+            names = ", ".join(f"'{n}'" for n in device_type_map)
+            click.echo(
+                f"Cannot determine which avionics this card belongs to.\n"
+                f"Create a file named 'avionics.txt' in the SD card root containing "
+                f"exactly one of: {names}",
+                err=True,
+            )
+        else:
+            click.echo(
+                "Cannot determine avionics type — no device_type_map in manifest.\n"
+                "Re-run 'avcardtool navdata download' to refresh the manifest.",
+                err=True,
+            )
+        sys.exit(1)
+    click.echo(f"Target avionics db_type: 0x{target_db_type:04X}")
+
+    entries, skipped = _filter_entries_for_avionics(entries, target_db_type)
+    if skipped:
+        names = sorted({f"{e['avdb_type']} ({Path(e['local_path']).name})" for e in skipped})
+        click.echo(f"Skipping {len(skipped)} file(s) for other avionics: "
+                   + ", ".join(names[:8]) + (" …" if len(names) > 8 else ""))
+    if not entries:
+        click.echo(
+            f"Nothing in the download is for this card's avionics (db_type 0x{target_db_type:04X}).",
+            err=True,
+        )
+        sys.exit(1)
+    # Every later step (cleanup, GarminDevice.xml, flyGarmin install report)
+    # must only see this card's databases.
+    manifest = {**manifest, "entries": entries}
+
+    # ---------------------------------------------------------------
     # Summary and confirmation
     # ---------------------------------------------------------------
     avdb_types = sorted({e["avdb_type"] for e in entries})
@@ -1783,29 +1848,6 @@ def navdata_install(ctx, sd_card: Optional[Path], from_dir: Optional[Path], yes:
     # so Step 3 can look up the correct security_id per extracted file.
     _extracted_security_ids: dict[str, int] = {}
 
-    # Determine which avionics unit this card belongs to, for logging and
-    # feat_unlk.dat identification. Files are installed as-is — the Garmin
-    # entitlements API already serves the correct files for each device.
-    click.echo("\nResolving target avionics type...")
-    target_db_type: Optional[int] = _resolve_target_db_type(sd_card, manifest)
-    if target_db_type is None:
-        device_type_map = manifest.get("device_type_map", {})
-        if device_type_map:
-            names = ", ".join(f"'{n}'" for n in device_type_map)
-            click.echo(
-                f"Cannot determine which avionics this card belongs to.\n"
-                f"Create a file named 'avionics.txt' in the SD card root containing "
-                f"exactly one of: {names}",
-                err=True,
-            )
-        else:
-            click.echo(
-                "Cannot determine avionics type — no device_type_map in manifest.\n"
-                "Re-run 'avcardtool navdata download' to refresh the manifest.",
-                err=True,
-            )
-        sys.exit(1)
-    click.echo(f"Target avionics db_type: 0x{target_db_type:04X}")
 
     click.echo(f"\nInstalling {len(entries)} file(s)...")
 
