@@ -1160,8 +1160,6 @@ def navdata_download(ctx, aircraft: int, device: Optional[int], series: Optional
         card_serial = "0"
 
     try:
-        from avcardtool.navdata.garmin.api import BatchDatabase
-        from avcardtool.navdata.garmin.feat_unlk import parse_system_id
         api = FlyGarminAPI(auth)
         aircraft_list = api.list_aircraft()
 
@@ -1202,40 +1200,10 @@ def navdata_download(ctx, aircraft: int, device: Optional[int], series: Optional
             click.echo("No installable database issues found.")
             return
 
+        # No batch-update session: POST /batch-updates/ returned 500 every
+        # time, and direct unlock (the fallback it always ended up on) works.
         # ---------------------------------------------------------------
-        # Step 2: create a batch-update session (mirrors Garmin's own client)
-        # ---------------------------------------------------------------
-        batch_dbs = []
-        for dev, avdb, s, target in plan:
-            batch_dbs.append(BatchDatabase(
-                series_id=s.series_id,
-                issue_name=target.name,
-                device_ids=[dev.device_id],
-            ))
-
-        click.echo(f"\nCreating batch-update session for {len(batch_dbs)} database(s)...")
-        batch_id = None
-        batch_system_ids: list = []
-        try:
-            batch_id = api.create_batch_update(batch_dbs)
-            click.echo(f"Batch ID: {batch_id}")
-            # GET the plan — the response includes device serial numbers (used for feat_unlk.dat)
-            batch_plan = api.get_batch_update(batch_id)
-            batch_system_ids = [
-                sid for sid in (
-                    parse_system_id(d.get("serial"))
-                    for d in batch_plan.get("devices", [])
-                )
-                if sid is not None
-            ]
-            if batch_system_ids:
-                click.echo(f"Device serial(s): {[f'0x{s:X}' for s in batch_system_ids]}")
-        except Exception as e:
-            click.echo(f"Warning: could not create batch session ({e}). Falling back to direct unlock.")
-            batch_id = None
-
-        # ---------------------------------------------------------------
-        # Step 3: for each entry unlock, fetch file list, and download
+        # Step 2: for each entry unlock, fetch file list, and download
         # ---------------------------------------------------------------
         manifest_entries = []
         downloaded = []
@@ -1247,7 +1215,7 @@ def navdata_download(ctx, aircraft: int, device: Optional[int], series: Optional
             # Unlock with BatchUpdate auth if we have a session
             unlock_codes = []
             try:
-                unlock_resp = api.unlock(s.series_id, target.name, dev.device_id, batch_id=batch_id)
+                unlock_resp = api.unlock(s.series_id, target.name, dev.device_id)
                 unlock_codes = unlock_resp.get("unlockCodes", [])
                 click.echo("    Unlocked.")
             except Exception as e:
@@ -1302,17 +1270,13 @@ def navdata_download(ctx, aircraft: int, device: Optional[int], series: Optional
         # Write manifest so 'navdata install' knows destinations and cleanup paths
         if manifest_entries:
             import datetime
-            # Collect unique system IDs.  Prefer serials from the batch-update
-            # GET response (which includes the real hardware serial); fall back
-            # to whatever the aircraft list returned.
-            if batch_system_ids:
-                system_ids = batch_system_ids
-            else:
-                system_ids = list({
-                    dev.system_id_raw
-                    for dev, _, _, _ in plan
-                    if dev.system_id_raw is not None
-                })
+            # Unique System IDs from the aircraft list (device_system_ids
+            # below records which device each belongs to).
+            system_ids = list({
+                dev.system_id_raw
+                for dev, _, _, _ in plan
+                if dev.system_id_raw is not None
+            })
             # Determine the target avionics database_type via the /device-models/ API.
             # Each device model has a productID that equals the TAW header database_type
             # (= feat_unlk security_id).  Match the device name(s) in our plan against
@@ -1371,7 +1335,6 @@ def navdata_download(ctx, aircraft: int, device: Optional[int], series: Optional
                     for dev, _, _, _ in plan
                     if dev.system_id_raw is not None
                 },
-                "batch_id": batch_id,          # used by install for PUT /devices/installed-issues
                 "device_database_type": primary_db_type,  # TAW db_type for this avionics unit
                 "device_type_map": device_type_map,        # name → productID for all devices
                 "entries": manifest_entries,
@@ -2128,8 +2091,9 @@ def navdata_install(ctx, sd_card: Optional[Path], from_dir: Optional[Path], yes:
     #
     # PUT /devices/installed-issues tells the server which cycles are
     # now on the card so fly.garmin.com shows the correct status and
-    # subscription tracking stays up to date.  Uses the same BatchUpdate
-    # session that was created during download.
+    # subscription tracking stays up to date.  Needs the BatchUpdate
+    # session from download, which is currently disabled (it returned 500),
+    # so this only runs for manifests that still carry a batch_id.
     # ---------------------------------------------------------------
     batch_id = manifest.get("batch_id")
     if batch_id and installed_files:
@@ -2230,8 +2194,7 @@ def navdata_auto_update(ctx, device: Optional[Path]):
         _log.info("DRY RUN: reporting the update plan only — no unlock, download, or card writes")
 
     from avcardtool.navdata.garmin.auth import GarminAuth, GarminAPIError
-    from avcardtool.navdata.garmin.api import FlyGarminAPI, BatchDatabase
-    from avcardtool.navdata.garmin.feat_unlk import parse_system_id
+    from avcardtool.navdata.garmin.api import FlyGarminAPI
     from avcardtool.navdata.garmin.taw_parser import TAWParser
     from avcardtool.navdata.sdcard import SDCardDetector
     from avcardtool.notifications.events import (
@@ -2464,26 +2427,6 @@ def navdata_auto_update(ctx, device: Optional[Path]):
         if feat_unlk_crcs:
             _log.info(f"  feat_unlk.dat CRCs: { {k: hex(v) for k, v in feat_unlk_crcs.items()} }")
 
-        # Create a batch session for the issues we plan to download.
-        batch_id = None
-        batch_system_ids: list = []
-        try:
-            batch_dbs = [
-                BatchDatabase(series_id=s.series_id, issue_name=issue.name, device_ids=[target_dev.device_id])
-                for _, s, issue, _, _ in plan
-            ]
-            batch_id = api.create_batch_update(batch_dbs)
-            batch_plan = api.get_batch_update(batch_id)
-            batch_system_ids = [
-                sid for sid in (
-                    parse_system_id(d.get("serial"))
-                    for d in batch_plan.get("devices", [])
-                )
-                if sid is not None
-            ]
-        except Exception as e:
-            _log.warning(f"  Batch session failed ({e}) — continuing without batch auth")
-
         manifest_entries = []
         # (avdb name, issue name) → cycle-transition info for the notification
         plan_info = {
@@ -2556,7 +2499,7 @@ def navdata_auto_update(ctx, device: Optional[Path]):
 
             # slot == "mine" — download now
             try:
-                api.unlock(s.series_id, issue.name, target_dev.device_id, batch_id=batch_id)
+                api.unlock(s.series_id, issue.name, target_dev.device_id)
             except Exception as e:
                 msg = f"Unlock failed for {cache_key}: {e}"
                 _log.warning(f"  {msg}")
@@ -2635,9 +2578,7 @@ def navdata_auto_update(ctx, device: Optional[Path]):
             continue
 
         # Write per-card manifest (files are in card_dir, local_path relative to card_dir)
-        system_ids = batch_system_ids or (
-            [target_dev.system_id_raw] if target_dev.system_id_raw is not None else []
-        )
+        system_ids = [target_dev.system_id_raw] if target_dev.system_id_raw is not None else []
         manifest_path = card_dir / "navdata_manifest.json"
         with open(manifest_path, "w") as f:
             json.dump({
@@ -2645,7 +2586,6 @@ def navdata_auto_update(ctx, device: Optional[Path]):
                 "aircraft": ac.tail_number,
                 "card_serial": card_serial,
                 "system_ids": system_ids,
-                "batch_id": batch_id,
                 "device_database_type": target_db_type,
                 "device_type_map": device_type_map,
                 "entries": manifest_entries,
@@ -2817,8 +2757,7 @@ def navdata_update(ctx, device: Optional[Path], aircraft: int, yes: bool):
     import datetime
     import time as _time
     from avcardtool.navdata.garmin.auth import GarminAuth, GarminAPIError
-    from avcardtool.navdata.garmin.api import FlyGarminAPI, BatchDatabase
-    from avcardtool.navdata.garmin.feat_unlk import parse_system_id
+    from avcardtool.navdata.garmin.api import FlyGarminAPI
     from avcardtool.navdata.garmin.taw_parser import TAWParser
     from avcardtool.navdata.sdcard import SDCardDetector
 
@@ -3168,27 +3107,6 @@ def navdata_update(ctx, device: Optional[Path], aircraft: int, yes: bool):
 
         feat_unlk_crcs = _read_feat_unlk_crcs(mount)
 
-        # Create batch session for this card
-        batch_id = None
-        batch_system_ids: list = []
-        try:
-            batch_dbs = [
-                BatchDatabase(series_id=s.series_id, issue_name=issue.name, device_ids=[target_dev.device_id])
-                for _, s, issue, _, _, _, _, _ in plan_details
-            ]
-            batch_id = api.create_batch_update(batch_dbs)
-            batch_plan = api.get_batch_update(batch_id)
-            batch_system_ids = [
-                sid for sid in (
-                    parse_system_id(d.get("serial"))
-                    for d in batch_plan.get("devices", [])
-                )
-                if sid is not None
-            ]
-            click.echo(f"Batch session: {batch_id}")
-        except Exception as e:
-            click.echo(f"Warning: batch session failed ({e}) — using direct auth")
-
         manifest_entries = []
         crc_confirmed: dict = {}  # avdb.name -> issue.name for CRC-matched items
 
@@ -3244,7 +3162,7 @@ def navdata_update(ctx, device: Optional[Path], aircraft: int, yes: bool):
 
             # slot == "mine" — download now
             try:
-                api.unlock(s.series_id, issue.name, target_dev.device_id, batch_id=batch_id)
+                api.unlock(s.series_id, issue.name, target_dev.device_id)
                 click.echo("    Unlocked.")
             except Exception as e:
                 click.echo(f"    Warning: unlock failed ({e}) — attempting download anyway.", err=True)
@@ -3339,9 +3257,7 @@ def navdata_update(ctx, device: Optional[Path], aircraft: int, yes: bool):
                     click.echo(f"  Warning: could not update .navdata_cycles.json: {e}", err=True)
             continue
 
-        system_ids = batch_system_ids or (
-            [target_dev.system_id_raw] if target_dev.system_id_raw is not None else []
-        )
+        system_ids = [target_dev.system_id_raw] if target_dev.system_id_raw is not None else []
         manifest_path = card_dir / "navdata_manifest.json"
         with open(manifest_path, "w") as f:
             json.dump({
@@ -3349,7 +3265,6 @@ def navdata_update(ctx, device: Optional[Path], aircraft: int, yes: bool):
                 "aircraft": ac.tail_number,
                 "card_serial": card_serial,
                 "system_ids": system_ids,
-                "batch_id": batch_id,
                 "device_database_type": target_db_type,
                 "device_type_map": device_type_map,
                 "entries": manifest_entries,
