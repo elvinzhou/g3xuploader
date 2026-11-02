@@ -1122,7 +1122,7 @@ def navdata_list_databases(ctx):
 @click.option('--issue', '-i', default=None,
               help='Specific issue/cycle name (default: latest installable)')
 @click.option('--card-serial', default=None,
-              help='SD card volume serial for unlock (default: auto-detect)')
+              help='SD card volume serial, used to build feat_unlk.dat (default: auto-detect)')
 @click.option(
     '--output', '-o',
     type=click.Path(path_type=Path),
@@ -1247,7 +1247,7 @@ def navdata_download(ctx, aircraft: int, device: Optional[int], series: Optional
             # Unlock with BatchUpdate auth if we have a session
             unlock_codes = []
             try:
-                unlock_resp = api.unlock(s.series_id, target.name, dev.device_id, card_serial, batch_id=batch_id)
+                unlock_resp = api.unlock(s.series_id, target.name, dev.device_id, batch_id=batch_id)
                 unlock_codes = unlock_resp.get("unlockCodes", [])
                 click.echo("    Unlocked.")
             except Exception as e:
@@ -2515,7 +2515,7 @@ def navdata_auto_update(ctx, device: Optional[Path]):
 
             # slot == "mine" — download now
             try:
-                api.unlock(s.series_id, issue.name, target_dev.device_id, card_serial, batch_id=batch_id)
+                api.unlock(s.series_id, issue.name, target_dev.device_id, batch_id=batch_id)
             except Exception as e:
                 msg = f"Unlock failed for {cache_key}: {e}"
                 _log.warning(f"  {msg}")
@@ -3203,7 +3203,7 @@ def navdata_update(ctx, device: Optional[Path], aircraft: int, yes: bool):
 
             # slot == "mine" — download now
             try:
-                api.unlock(s.series_id, issue.name, target_dev.device_id, card_serial, batch_id=batch_id)
+                api.unlock(s.series_id, issue.name, target_dev.device_id, batch_id=batch_id)
                 click.echo("    Unlocked.")
             except Exception as e:
                 click.echo(f"    Warning: unlock failed ({e}) — attempting download anyway.", err=True)

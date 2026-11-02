@@ -136,3 +136,19 @@ def test_no_size_known_at_all_still_downloads(tmp_path):
     api = make_api(head_size=None, get_response=FakeResponse(BODY, {}))
     dest = api.download_file(db_file(size=0), tmp_path)
     assert dest.read_bytes() == BODY
+
+
+def test_unlock_does_not_send_card_serial():
+    """flyGarmin rejected cardSerial with 400 for many series; it's never needed."""
+    api = FlyGarminAPI(mock.Mock())
+    api._session = mock.Mock()
+    ok = mock.Mock(status_code=200)
+    ok.json.return_value = {"unlockCodes": []}
+    api._session.get.return_value = ok
+
+    api.unlock(1298, "20T1", 4244058, batch_id="abc")
+
+    api._session.get.assert_called_once()
+    _, kwargs = api._session.get.call_args
+    assert kwargs["params"] == {"deviceIDs": 4244058}
+    assert kwargs["headers"] == {"Authorization": 'BatchUpdate id="abc"'}
