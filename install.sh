@@ -161,7 +161,11 @@ sudo -u "$REAL_USER" mkdir -p "$DATA_DIR"
 if [ ! -f "$CONFIG_FILE" ]; then
     echo "Launching setup wizard..."
     echo ""
-    sudo -u "$REAL_USER" "$SYMLINK" setup --config-path "$CONFIG_FILE" < /dev/tty
+    # runuser, not sudo -u: when this script is piped in (curl ... | sudo bash),
+    # sudo's use_pty default (Raspberry Pi OS Bookworm) puts the wizard in a
+    # pseudo-terminal that never receives keyboard input, so it hangs at the
+    # first prompt. runuser doesn't allocate a pty.
+    runuser -u "$REAL_USER" -- "$SYMLINK" setup --config-path "$CONFIG_FILE" < /dev/tty
 else
     echo "Config already exists: $CONFIG_FILE (skipping setup wizard)"
     # Patch stale /var/log path from old installs
