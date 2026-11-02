@@ -493,6 +493,46 @@ def flight_flysto_auth(ctx, authorization_code: str):
         sys.exit(1)
 
 
+@flight.command('flysto-login')
+@click.pass_context
+def flight_flysto_login(ctx):
+    """
+    Pair this device with FlySto through an auth relay (ADVANCED).
+
+    Requires `auth_relay_url` under flight_data.uploaders.flysto in the config.
+    Shows a link/QR code to open on another device, then waits for approval.
+    Intended for headless devices (e.g. Raspberry Pi) where the normal
+    browser redirect to localhost isn't practical.
+    """
+    from avcardtool.flight_data.uploaders import FlyStoUploader
+
+    cfg = ctx.obj['config']
+    entry = cfg.flight_data.uploaders.get('flysto')
+    if entry is None:
+        click.echo("Error: FlySto not configured. Please add flysto configuration first.", err=True)
+        sys.exit(1)
+
+    uploader_config = dict(entry.config)
+    uploader_config['data_dir'] = cfg.system.data_dir
+    uploader = FlyStoUploader(uploader_config)
+
+    if not uploader.auth_relay_url:
+        click.echo(
+            "Error: 'auth_relay_url' is not set for flysto in the config (advanced option).\n"
+            "Use 'avcardtool flight flysto-auth <code>' for the standard OAuth flow.",
+            err=True,
+        )
+        sys.exit(1)
+
+    success, message = uploader.login_via_relay(echo=click.echo)
+    if success:
+        click.echo(f"✓ {message}")
+        click.echo(f"Tokens saved to: {uploader.token_file}")
+    else:
+        click.echo(f"✗ {message}", err=True)
+        sys.exit(1)
+
+
 # ============================================================================
 # Auto-Process Command
 # ============================================================================

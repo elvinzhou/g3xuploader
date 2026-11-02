@@ -436,7 +436,14 @@ class Config:
                 config={
                     "client_id": "your-client-id",
                     "client_secret": "your-client-secret",
-                    "redirect_uri": "http://localhost:8080/callback"
+                    "redirect_uri": "http://localhost:8080/callback",
+                    "_advanced_auth_relay_url": (
+                        "ADVANCED - leave auth_relay_url empty unless you know you need it. "
+                        "Set it to the URL of your own FlySto auth relay (see relay/) to pair "
+                        "headless devices with 'avcardtool flight flysto-login'; the relay "
+                        "holds the client secret. Flight logs never pass through the relay."
+                    ),
+                    "auth_relay_url": ""
                 }
             ),
             "savvy_aviation": UploaderConfig(

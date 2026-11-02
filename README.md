@@ -80,6 +80,8 @@ You are asked whether to enable each service. Only enabled services will receive
 
 - **CloudAhoy** — API token (Bearer token from your CloudAhoy account)
 - **FlySto** — OAuth2 Client ID and Client Secret (from FlySto developer settings), redirect URI (default: `http://localhost:8080/callback`). The wizard prints the authorization URL and offers to complete the OAuth code exchange inline. You can skip this and authorize later with `avcardtool flight flysto-auth <code>`.
+
+  **Advanced — auth relay (`auth_relay_url`):** for headless devices such as a Raspberry Pi, you can set `auth_relay_url` under `flight_data.uploaders.flysto` to the URL of a FlySto auth relay (a small Cloudflare Worker, source in [`relay/`](relay/)). The relay holds the client secret, so `client_id`/`client_secret` are not needed on the device. Pair with `avcardtool flight flysto-login` (shows a link, and a QR code if the optional `qrcode` package is installed), then open it on your phone. Flight logs are still uploaded directly to FlySto and never pass through the relay. Leave this empty unless you know you need it.
 - **Savvy Aviation** — No credentials required. Files are staged locally at `<data_dir>/savvy_staging/` for manual upload via their website.
 - **Carryd** — API key (format: `eal_...`, obtained from the Carryd dashboard under **Settings → API Keys**) and an optional comma-separated list of engine logbook UUIDs (found under **Logbook → Settings**). Omit logbook UUIDs to update total airframe time only.
 

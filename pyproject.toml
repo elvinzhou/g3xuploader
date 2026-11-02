@@ -38,6 +38,10 @@ classifiers = [
 python = ">=3.9,<3.15"
 requests = "^2.28.0"
 click = "^8.0.0"
+qrcode = {version = ">=7.4.2", optional = true}
+
+[tool.poetry.extras]
+qr = ["qrcode"]
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^7.0.0"
