@@ -3415,10 +3415,26 @@ def setup_wizard(ctx, config_path: Optional[Path]):
     if auto_process_flights:
         # --- Hobbs / Tach settings ---
         click.echo("\n  Log Processing Settings:")
-        click.echo("  (These affect how Hobbs and Tach times are calculated.)\n")
+        click.echo(
+            "  These decide how Hobbs and Tach are calculated between the times\n"
+            "  your avionics records its own readings (each log's header), which\n"
+            "  always win when available.\n"
+            "\n"
+            "  ⚠  Make them match your avionics' configuration (on a G3X:\n"
+            "     Engine/Airframe configuration → Airframe Time and Engine Time).\n"
+            "     If they don't, avcardtool's numbers drift from the avionics' —\n"
+            "     e.g. counting Hobbs from engine start when the G3X counts only\n"
+            "     airborne time overestimated Hobbs by about 16% on real logs.\n"
+            "     See \"Matching Hobbs and Tach to your avionics\" in the README.\n"
+        )
 
         hobbs_trigger = click.prompt(
-            "  Hobbs time trigger",
+            "  Hobbs time trigger — what starts the clock\n"
+            "    oil_pressure = engine running (oil pressure up)\n"
+            "    rpm          = engine running (RPM above threshold)\n"
+            "    flight_time  = airborne only (match a G3X whose Airframe Time\n"
+            "                   counts flight time)\n"
+            "  Trigger",
             type=click.Choice(['oil_pressure', 'rpm', 'flight_time']),
             default='oil_pressure',
             show_choices=True
@@ -3426,7 +3442,7 @@ def setup_wizard(ctx, config_path: Optional[Path]):
         airframe_time_cfg.trigger = hobbs_trigger
 
         tach_mode = click.prompt(
-            "  Tach time mode\n"
+            "  Tach time mode (the G3X's Engine Time Record Mode)\n"
             "    variable = time accrues at RPM / Standard Recording RPM (most common)\n"
             "    fixed    = 1:1 with clock whenever engine is running\n"
             "  Mode",
@@ -3438,13 +3454,12 @@ def setup_wizard(ctx, config_path: Optional[Path]):
 
         if tach_mode == 'variable':
             click.echo(
-                "  Tach is estimated from RPM; whenever the avionics has recorded its\n"
-                "  own engine hours, that value is used instead. For the closest\n"
-                "  estimate, use the avionics' Standard Recording RPM (on a G3X:\n"
-                "  Engine/Airframe configuration → Engine Time)."
+                "  Use the avionics' Standard Recording RPM (G3X: Engine Time →\n"
+                "  Standard Recording RPM). Not redline — using redline (e.g. 2700\n"
+                "  instead of 2350) underestimated tach by about 15% on real logs."
             )
             engine_time_cfg.reference_rpm = click.prompt(
-                "  Standard Recording RPM (1 tach hour per hour at this RPM — not redline)",
+                "  Standard Recording RPM (1 tach hour per hour at this RPM)",
                 default=engine_time_cfg.reference_rpm, type=int,
             )
 
