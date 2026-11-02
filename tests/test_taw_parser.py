@@ -246,3 +246,48 @@ def sample_taw_file(tmp_path):
     taw_file = tmp_path / "sample.taw"
     taw_file.write_bytes(build_taw(regions=[(0x01, b'Hello, World!')]))
     return taw_file
+
+
+class TestFatattr:
+    """FAT attributes can only be set on FAT; elsewhere skip quietly after the first try."""
+
+    def _run(self, stderr, returncode=1):
+        from types import SimpleNamespace
+        calls = []
+
+        def fake(cmd, **kwargs):
+            calls.append(cmd)
+            return SimpleNamespace(returncode=returncode, stderr=stderr.encode())
+        return fake, calls
+
+    def test_non_fat_filesystem_tried_once_then_skipped(self, tmp_path, monkeypatch, caplog):
+        from avcardtool.navdata.garmin import taw_parser
+        monkeypatch.setattr(taw_parser, "_NON_FAT_DEVICES", set())
+        fake, calls = self._run("x.jnx: Inappropriate ioctl for device")
+        monkeypatch.setattr("subprocess.run", fake)
+        files = [tmp_path / f"f{i}.jnx" for i in range(5)]
+        for f in files:
+            f.write_bytes(b"x")
+
+        with caplog.at_level("INFO"):
+            for f in files:
+                taw_parser._clear_readonly(f)
+                taw_parser._set_hidden(f)
+
+        assert len(calls) == 1
+        assert not [r for r in caplog.records if r.levelname == "WARNING"]
+        assert sum("not on a FAT filesystem" in r.message for r in caplog.records) == 1
+
+    def test_other_failures_still_warn_every_time(self, tmp_path, monkeypatch, caplog):
+        from avcardtool.navdata.garmin import taw_parser
+        monkeypatch.setattr(taw_parser, "_NON_FAT_DEVICES", set())
+        fake, calls = self._run("Permission denied")
+        monkeypatch.setattr("subprocess.run", fake)
+        f = tmp_path / "f.jnx"
+        f.write_bytes(b"x")
+
+        taw_parser._set_hidden(f)
+        taw_parser._set_hidden(f)
+
+        assert len(calls) == 2
+        assert sum(r.levelname == "WARNING" for r in caplog.records) == 2

@@ -24,14 +24,36 @@ from enum import IntEnum
 logger = logging.getLogger(__name__)
 
 
+# Filesystems (by st_dev) where fatattr reported "not a FAT filesystem", so
+# attributes are skipped there for the rest of the run instead of failing
+# (and warning) once per file — e.g. installing into a test folder on ext4.
+_NON_FAT_DEVICES: set = set()
+
+
 def _fatattr(flags: str, path: Path) -> None:
     """Run fatattr with the given flags (e.g. '+h', '-r', '+r') on a FAT file."""
+    import os
     import subprocess
+    try:
+        dev = os.stat(path).st_dev
+    except OSError:
+        dev = None
+    if dev is not None and dev in _NON_FAT_DEVICES:
+        return
     try:
         result = subprocess.run(["fatattr", flags, str(path)],
                                 capture_output=True, timeout=5)
         if result.returncode != 0:
-            logger.warning(f"fatattr {flags} failed for {path}: {result.stderr.decode().strip()}")
+            err = result.stderr.decode(errors="replace").strip()
+            # ENOTTY: the FAT attribute ioctl doesn't exist on this filesystem
+            if "Inappropriate ioctl" in err and dev is not None:
+                _NON_FAT_DEVICES.add(dev)
+                logger.info(
+                    f"{path.parent} is not on a FAT filesystem — skipping FAT "
+                    f"hidden/read-only attributes there (only real SD cards need them)"
+                )
+                return
+            logger.warning(f"fatattr {flags} failed for {path}: {err}")
     except FileNotFoundError:
         logger.debug(f"fatattr not installed — could not set {flags} on {path} (install fatattr to suppress)")
     except subprocess.TimeoutExpired:
