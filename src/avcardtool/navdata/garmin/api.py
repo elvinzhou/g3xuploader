@@ -493,29 +493,64 @@ class FlyGarminAPI:
         confirm the file is accessible and to resolve the accurate file size
         before streaming.  Files are served from avdb.garmin.com without an
         Authorization header — access is controlled server-side after unlock.
+
+        Safe to interrupt and rerun:
+          * the file is streamed to "<name>.part" and only renamed to its
+            final name once the byte count matches the server's size, so a
+            file under the final name is always complete;
+          * a final file that already matches the server's size is reused
+            instead of downloaded again.
+
+        Raises:
+            GarminAPIError: if fewer (or more) bytes arrive than the server
+                said it would send. The partial file is removed.
         """
         output_dir.mkdir(parents=True, exist_ok=True)
         dest = output_dir / db_file.file_name
+        part = dest.with_name(dest.name + ".part")
 
         # HEAD first — verify accessibility and get authoritative size
         server_size = self.check_file(db_file.url)
         total = server_size or db_file.file_size
+
+        if server_size and dest.exists() and dest.stat().st_size == server_size:
+            logger.info(f"Already downloaded: {dest.name} ({server_size:,} bytes)")
+            if progress_callback:
+                progress_callback(server_size, server_size)
+            return dest
+
         logger.info(f"Downloading {db_file.file_name} ({total:,} bytes)")
 
         resp = self._session.get(db_file.url, stream=True, timeout=600)
         resp.raise_for_status()
 
+        # Size to verify against: what this response says it will send, else
+        # the HEAD size. The API's file_size metadata is only used for progress.
+        # A compressed transfer encoding changes the byte count, so skip the
+        # check then (avdb.garmin.com serves the files as-is).
+        encoded = resp.headers.get("content-encoding", "identity").lower() not in ("", "identity")
+        expected = None if encoded else (int(resp.headers.get("content-length", 0)) or server_size)
         if not total:
-            total = int(resp.headers.get("content-length", 0))
+            total = expected or 0
 
         downloaded = 0
-        with open(dest, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=65536):
-                if chunk:
-                    f.write(chunk)
-                    downloaded += len(chunk)
-                    if progress_callback and total:
-                        progress_callback(downloaded, total)
+        try:
+            with open(part, "wb") as f:
+                for chunk in resp.iter_content(chunk_size=65536):
+                    if chunk:
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if progress_callback and total:
+                            progress_callback(downloaded, total)
+            if expected and downloaded != expected:
+                raise GarminAPIError(
+                    f"Incomplete download of {db_file.file_name}: got {downloaded:,} "
+                    f"of {expected:,} bytes. Run the download again to retry."
+                )
+        except BaseException:
+            part.unlink(missing_ok=True)
+            raise
 
+        part.replace(dest)
         logger.info(f"Saved to {dest}")
         return dest
