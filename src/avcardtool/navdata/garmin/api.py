@@ -16,8 +16,8 @@ Response structure (from observed API traffic):
 Download flow:
     1. list_aircraft()                       → pick device + series + issue
     2. list_files(series_id, issue_name)     → get download URLs
-    3. unlock(series_id, issue_name,         → authorise download for this card
-              device_id, card_serial)
+    3. unlock(series_id, issue_name,         → authorise download for this device
+              device_id)
     4. download_file(db_file, output_dir)    → fetch bytes
 """
 
@@ -348,19 +348,20 @@ class FlyGarminAPI:
         series_id: int,
         issue_name: str,
         device_id: int,
-        card_serial: Optional[str] = None,
         batch_id: Optional[str] = None,
     ) -> dict:
         """
-        Authorise download of a database issue for a specific device + SD card.
+        Authorise download of a database issue for a specific device.
+
+        The SD card serial is deliberately not sent: flyGarmin rejected it
+        with 400 for many series, and nothing avcardtool installs depends on
+        this response — feat_unlk.dat is built locally from the card's volume
+        ID and the avionics System ID.
 
         Args:
             series_id:   Series.series_id
             issue_name:  Issue.name  (e.g. "2603")
             device_id:   Device.device_id
-            card_serial: SD card volume serial (from SDCardDetector).
-                         Omitted from the request when None, "0", or empty —
-                         Garmin's client does not always send it (e.g. Airport Dir).
             batch_id:    If provided, use BatchUpdate authorization instead of Bearer
         """
         if batch_id:
@@ -368,32 +369,12 @@ class FlyGarminAPI:
         else:
             auth_header = self._auth_headers()
 
-        params: dict = {"deviceIDs": device_id}
-        sent_card_serial = card_serial and card_serial != "0"
-        if sent_card_serial:
-            params["cardSerial"] = card_serial
-
         resp = self._session.get(
             f"{FLYGARMIN_API}/avdb-series/{series_id}/{issue_name}/unlock/",
-            params=params,
+            params={"deviceIDs": device_id},
             headers=auth_header,
             timeout=30,
         )
-
-        # Some series (e.g. Airport Directory) reject cardSerial with 400.
-        # Retry without it so the caller doesn't need to know which series care.
-        if resp.status_code == 400 and sent_card_serial:
-            logger.debug(
-                f"unlock {series_id}/{issue_name}: 400 with cardSerial — retrying without"
-            )
-            params.pop("cardSerial", None)
-            resp = self._session.get(
-                f"{FLYGARMIN_API}/avdb-series/{series_id}/{issue_name}/unlock/",
-                params=params,
-                headers=auth_header,
-                timeout=30,
-            )
-
         resp.raise_for_status()
         return resp.json()
 
@@ -478,6 +459,44 @@ class FlyGarminAPI:
             return None
         except Exception as e:
             logger.debug(f"HEAD {url} failed: {e}")
+            return None
+
+    TAW_HEADER_PEEK_BYTES = 4096
+
+    def peek_taw_database_type(self, db_file: DatabaseFile) -> Optional[int]:
+        """
+        Avionics type (TAW header database_type) of a .taw file, read from
+        its first few KiB instead of downloading the whole file.
+
+        A subscription's file list can include TAWs for other avionics
+        families (e.g. G600 'bdg600-*' files for a GTN); this lets callers
+        skip those before unlocking or downloading. Returns None for
+        non-TAW files or if the header can't be read, so callers should
+        treat None as "keep".
+        """
+        if not db_file.file_name.lower().endswith(".taw"):
+            return None
+        from avcardtool.navdata.garmin.taw_parser import TAWParser
+        try:
+            resp = self._session.get(
+                db_file.url,
+                headers={"Range": f"bytes=0-{self.TAW_HEADER_PEEK_BYTES - 1}"},
+                stream=True,
+                timeout=30,
+            )
+            try:
+                resp.raise_for_status()
+                # Read at most the peek size, even if the server ignored Range
+                data = b""
+                for chunk in resp.iter_content(chunk_size=self.TAW_HEADER_PEEK_BYTES):
+                    data += chunk
+                    if len(data) >= self.TAW_HEADER_PEEK_BYTES:
+                        break
+            finally:
+                resp.close()
+            return TAWParser().parse_header_bytes(data[:self.TAW_HEADER_PEEK_BYTES]).database_type
+        except Exception as e:
+            logger.debug(f"Could not read TAW header of {db_file.file_name}: {e}")
             return None
 
     def download_file(

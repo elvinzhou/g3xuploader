@@ -16,6 +16,16 @@ SYSTEM_ID_INT = 0x60002CA61BD97
 
 
 class TestParseSystemId:
+    def test_decimal_string_from_api(self):
+        """flyGarmin returns systemId in decimal; it's the same ID as the log's hex.
+        Real values from N662EZ: the G3X Touch's API systemId and the
+        System ID GADM wrote into that card's feat_unlk.dat."""
+        assert parse_system_id("1688861845601687") == SYSTEM_ID_INT
+        assert truncate_system_id(parse_system_id("1688861845601687")) == 0xCA67BD99
+
+    def test_decimal_json_number_from_api(self):
+        assert parse_system_id(1688861845601687) == SYSTEM_ID_INT
+
     def test_hex_string_from_api(self):
         """A hex string (the natural flyGarmin form) parses as base-16."""
         assert parse_system_id(SYSTEM_ID_STR) == SYSTEM_ID_INT
@@ -67,6 +77,10 @@ class TestDeviceParsing:
 
     def test_int_system_id_still_works(self):
         dev = _parse_device({"id": 1, "name": "GDU 460", "systemId": SYSTEM_ID_INT})
+        assert dev.system_id_raw == SYSTEM_ID_INT
+
+    def test_decimal_api_system_id(self):
+        dev = _parse_device({"id": 4244038, "name": "G3X Touch", "systemId": "1688861845601687"})
         assert dev.system_id_raw == SYSTEM_ID_INT
 
     def test_missing_system_id(self):
