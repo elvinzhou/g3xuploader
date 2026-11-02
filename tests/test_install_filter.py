@@ -68,6 +68,13 @@ def test_install_end_to_end(tmp_path):
     (card / "avionics.txt").write_text("GTN 6XX Xi")
     (card / "keep_me.odb").write_text("existing")      # listed only by a skipped entry
     (card / "also_keep.bin").write_text("existing")
+    (card / "Garmin").mkdir()
+    device_xml = (b"<?xml version=\"1.0\" encoding=\"UTF-8\"?><Device xmlns=\"http://www.garmin.com/"
+                  b"xmlschemas/GarminDevice/v2\"><UpdateFile><PartNumber>006-D0974-50</PartNumber>"
+                  b"<Version><Major>26</Major><Minor>7</Minor></Version></UpdateFile></Device>")
+    (card / "Garmin/GarminDevice.xml").write_bytes(device_xml)
+    (card / ".gadm.meta").write_text(json.dumps({"id": "abc", "garminAccount": "Elvin Zhou",
+                                                  "gadmAvionicsName": "G3X Touch"}))
 
     cfg = tmp_path / "config.json"
     cfg.write_text(json.dumps({"system": {"data_dir": str(tmp_path / "data"),
@@ -88,6 +95,12 @@ def test_install_end_to_end(tmp_path):
     # ...and their cleanup lists don't delete anything from this card
     assert (card / "keep_me.odb").read_text() == "existing"
     assert (card / "also_keep.bin").read_text() == "existing"
+    # GarminDevice.xml belongs to the avionics; GADM leaves it alone and so do we
+    assert (card / "Garmin/GarminDevice.xml").read_bytes() == device_xml
+    # .gadm.meta keeps GADM's account display name and card id
+    meta = json.loads((card / ".gadm.meta").read_text())
+    assert meta["garminAccount"] == "Elvin Zhou" and meta["id"] == "abc"
+    assert meta["gadmLastInstalled"].endswith("GMT+0000 (Coordinated Universal Time)")
 
 
 def test_install_refuses_when_nothing_matches(tmp_path):

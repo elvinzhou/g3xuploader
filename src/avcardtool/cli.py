@@ -1794,7 +1794,7 @@ def navdata_install(ctx, sd_card: Optional[Path], from_dir: Optional[Path], yes:
             err=True,
         )
         sys.exit(1)
-    # Every later step (cleanup, GarminDevice.xml, flyGarmin install report)
+    # Every later step (cleanup, feat_unlk.dat, flyGarmin install report)
     # must only see this card's databases.
     manifest = {**manifest, "entries": entries}
 
@@ -1978,19 +1978,14 @@ def navdata_install(ctx, sd_card: Optional[Path], from_dir: Optional[Path], yes:
             click.echo(f"Warning: could not write .evidf.dat: {e}", err=True)
 
     # ---------------------------------------------------------------
-    # Step 4: Update GarminDevice.xml version entries
+    # GarminDevice.xml is deliberately left alone: it is the avionics' own
+    # description of itself (written by the display), and GADM doesn't
+    # update it on install either — a GADM-updated card still lists the
+    # previous cycles there.
     # ---------------------------------------------------------------
 
-    garmin_device_xml = sd_card / "Garmin" / "GarminDevice.xml"
-    if garmin_device_xml.exists() and installed_files:
-        try:
-            _update_garmin_device_xml(garmin_device_xml, manifest)
-            click.echo("\nUpdated GarminDevice.xml")
-        except Exception as e:
-            click.echo(f"\nWarning: could not update GarminDevice.xml: {e}", err=True)
-
     # ---------------------------------------------------------------
-    # Step 5: Write .gadm.meta
+    # Step 4: Write .gadm.meta
     # Garmin Aviation Database Manager writes this hidden JSON file
     # to track which account/device last updated the card.
     # ---------------------------------------------------------------
@@ -2009,18 +2004,22 @@ def navdata_install(ctx, sd_card: Optional[Path], from_dir: Optional[Path], yes:
         # Pull account info from Garmin auth tokens if available
         garmin_account = existing_gadm.get("garminAccount", "")
         tail_number = existing_gadm.get("gadmTailNumber", manifest.get("aircraft", ""))
-        try:
-            from avcardtool.navdata.garmin.auth import GarminAuth
-            _auth = GarminAuth(token_dir=Path(cfg.system.data_dir))
-            if _auth.tokens.display_name:
-                garmin_account = _auth.tokens.display_name
-        except Exception:
-            pass
+        if not garmin_account:
+            # Only fill it in when missing: GADM writes the account's display
+            # name ("First Last"), which the login token doesn't know.
+            try:
+                from avcardtool.navdata.garmin.auth import GarminAuth
+                _auth = GarminAuth(token_dir=Path(cfg.system.data_dir))
+                if _auth.tokens.display_name:
+                    garmin_account = _auth.tokens.display_name
+            except Exception:
+                pass
 
         gadm = {
             "id": existing_gadm.get("id") or __import__("uuid").uuid4().hex,
             "garminAccount": garmin_account,
-            "gadmLastInstalled": _dt.datetime.now().strftime(
+            # UTC, matching the "GMT+0000" label (was local time mislabelled)
+            "gadmLastInstalled": _dt.datetime.now(_dt.timezone.utc).strftime(
                 "%a %b %d %Y %H:%M:%S GMT+0000 (Coordinated Universal Time)"
             ),
             "gadmAvionicsName": existing_gadm.get("gadmAvionicsName", "G3X Touch"),
@@ -2108,94 +2107,6 @@ def navdata_install(ctx, sd_card: Optional[Path], from_dir: Optional[Path], yes:
         click.echo(f"\nInstalled {len(installed_files)} file(s) to {sd_card}")
 
 
-def _update_garmin_device_xml(xml_path: Path, manifest: dict) -> None:
-    """
-    Update <UpdateFile> version entries in GarminDevice.xml for each
-    installed database.  Garmin's client does this after every install;
-    the G3X reads the file to show database currency on the avionics page.
-
-    Version encoding observed on a real card:
-        cycle "20T1"  → <Major>20</Major><Minor>1</Minor>
-        cycle "26B2"  → <Major>26</Major><Minor>2</Minor>
-        cycle "2603"  → <Major>26</Major><Minor>3</Minor>
-    i.e. Major = first two digits; Minor = trailing numeric digits.
-    """
-    import re
-    import xml.etree.ElementTree as ET
-
-    # Part-number prefixes known to map to each avdb type
-    # (derived from observed GarminDevice.xml entries)
-    AVDB_PART_PREFIXES = {
-        "NavData":   ["006-D0600", "006-D1159"],
-        "Terrain":   ["006-D0678"],
-        "Obstacle":  ["006-D0123"],
-        "SafeTaxi":  ["006-D0680"],
-        "ChartView": ["006-D3497"],
-    }
-
-    # Parse cycle string into Major/Minor
-    def _parse_cycle(cycle: str):
-        # Strip leading letters (e.g. "20T1" → year=20, minor=1)
-        # Keep trailing digits as Minor; leading digits as Major
-        m = re.match(r'^(\d+)\D*(\d+)$', cycle)
-        if m:
-            return int(m.group(1)), int(m.group(2))
-        m = re.match(r'^(\d{2})(\d{2})$', cycle)  # plain "2603"
-        if m:
-            return int(m.group(1)), int(m.group(2))
-        return None, None
-
-    # Build a mapping: avdb_type → (major, minor) from manifest entries
-    type_versions: dict = {}
-    for entry in manifest.get("entries", []):
-        avdb_type = entry.get("avdb_type", "")
-        issue_name = entry.get("issue_name", "")
-        major, minor = _parse_cycle(issue_name)
-        if major is not None and avdb_type not in type_versions:
-            type_versions[avdb_type] = (major, minor)
-
-    if not type_versions:
-        return
-
-    # Parse XML preserving the original text as much as possible
-    ET.register_namespace("", "http://www.garmin.com/xmlschemas/GarminDevice/v2")
-    ET.register_namespace("xsi", "http://www.w3.org/2001/XMLSchema-instance")
-    tree = ET.parse(xml_path)
-    root = tree.getroot()
-
-    ns = {"gd": "http://www.garmin.com/xmlschemas/GarminDevice/v2"}
-
-    for update_file in root.findall(".//gd:UpdateFile", ns):
-        pn_el = update_file.find("gd:PartNumber", ns)
-        if pn_el is None:
-            continue
-        part_number = pn_el.text or ""
-
-        for avdb_type, prefixes in AVDB_PART_PREFIXES.items():
-            if any(part_number.startswith(p) for p in prefixes):
-                if avdb_type not in type_versions:
-                    continue
-                major, minor = type_versions[avdb_type]
-                ver_el = update_file.find("gd:Version", ns)
-                if ver_el is not None:
-                    maj_el = ver_el.find("gd:Major", ns)
-                    min_el = ver_el.find("gd:Minor", ns)
-                    if maj_el is not None:
-                        maj_el.text = str(major)
-                    if min_el is not None:
-                        min_el.text = str(minor)
-                # Remove <Description>Missing</Description> if present
-                desc_el = update_file.find("gd:Description", ns)
-                if desc_el is not None and desc_el.text == "Missing":
-                    update_file.remove(desc_el)
-                break
-
-    tree.write(xml_path, encoding="UTF-8", xml_declaration=True)
-
-
-@navdata.command('auto-update')
-@click.argument('device', type=click.Path(path_type=Path, readable=False), required=False)
-@click.pass_context
 def navdata_auto_update(ctx, device: Optional[Path]):
     """
     Silently update all inserted SD cards with latest navigation databases.
