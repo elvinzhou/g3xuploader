@@ -18,15 +18,20 @@ logger = logging.getLogger(__name__)
 @dataclass
 class EngineTimeConfig:
     """
-    Engine Time (Tach Time) Configuration
+    Engine Time (Tach Time) Configuration.
+
+    The computed tach is an estimate: wherever the avionics recorded its own
+    engine hours (the next log's header), that value is used instead.
 
     mode: "variable" or "fixed"
     - variable: Time accrues at (RPM / reference_rpm) rate
     - fixed: Time accrues at 1:1 with clock when RPM > minimum_recording_rpm
+    reference_rpm: the G3X's Standard Recording RPM — 1 tach hour per hour at
+        this RPM. Not redline: setting it to redline makes tach run low.
     """
     mode: str = "variable"
     minimum_recording_rpm: int = 500
-    reference_rpm: int = 2700
+    reference_rpm: int = 2300   # the G3X manual's example Standard Recording RPM
 
 
 @dataclass

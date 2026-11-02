@@ -26,10 +26,12 @@ class TachCalculator:
     """
     Calculates Tach (engine) time.
 
-    Supports two modes:
-    - variable: Time accrues at (RPM / reference_rpm) rate
-      Example: At 2700 RPM with reference 2700: 1 hour flight = 1.0 tach hour
-               At 2400 RPM with reference 2700: 1 hour flight = 0.89 tach hour
+    An estimate of the G3X's Engine Time recording; where the avionics'
+    own engine hours are available they replace it:
+    - variable: Time accrues at (RPM / reference_rpm) rate, where
+      reference_rpm is the G3X's Standard Recording RPM
+      Example: At 2300 RPM with reference 2300: 1 hour flight = 1.0 tach hour
+               At 2100 RPM with reference 2300: 1 hour flight = 0.91 tach hour
     - fixed: Time accrues at 1:1 when RPM > minimum_recording_rpm
     """
 

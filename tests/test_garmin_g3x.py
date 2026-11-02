@@ -185,7 +185,7 @@ class TestTachCalculator:
 
     def test_tach_variable_mode(self, sample_flight_path, default_config):
         """Test Tach in variable mode."""
-        # Default config uses variable mode with reference_rpm=2700
+        # Default config uses variable mode with reference_rpm=2300 (Standard Recording RPM)
         processor = GarminG3XProcessor()
         flight_data = processor.parse_log(sample_flight_path)
 
@@ -329,3 +329,59 @@ class TestCompleteAnalysis:
         # Analysis should complete successfully without any upload service configured
         assert analysis.detection.is_flight
         # No assertions about uploads - they're not implemented yet
+
+
+def test_utc_offset_is_read_from_the_log(tmp_path):
+    """The log's local times carry an offset; it's kept for services that need UTC."""
+    from avcardtool.flight_data import GarminG3XProcessor, FlightDataAnalyzer
+    from avcardtool.core.config import FlightDataConfig
+    sample = Path(__file__).parent / "test_data" / "sample_flight.csv"
+    fd = GarminG3XProcessor().parse_log(sample)
+    assert fd.metadata.additional["utc_offset"] == "-05:00"
+    assert FlightDataAnalyzer(FlightDataConfig()).analyze_summary(fd)["utc_offset"] == "-05:00"
+
+
+def test_log_without_utc_offset_column(tmp_path):
+    from avcardtool.flight_data import GarminG3XProcessor
+    sample = Path(__file__).parent / "test_data" / "sample_flight.csv"
+    lines = sample.read_text().splitlines()
+    cols = lines[1].split(",")
+    drop = next(i for i, c in enumerate(cols) if "UTC Offset" in c)
+    trimmed = [lines[0]] + [",".join(v for i, v in enumerate(l.split(",")) if i != drop)
+                            for l in lines[1:]]
+    log = tmp_path / "log_20260101_000000_KXXX.csv"
+    log.write_text("\n".join(trimmed) + "\n")
+    fd = GarminG3XProcessor().parse_log(log)
+    assert "utc_offset" not in fd.metadata.additional
+    assert fd.data_points  # still parses normally
+
+
+class TestTachMatchesG3X:
+    """Tach estimates the G3X's Engine Time recording (Standard Recording RPM)."""
+
+    def _flight(self, rpms):
+        from datetime import datetime, timedelta
+        from avcardtool.flight_data.base.processor import FlightData, FlightMetadata, DataPoint
+        t0 = datetime(2026, 9, 17, 16, 0, 0)
+        pts = [DataPoint(timestamp=t0 + timedelta(seconds=i), rpm=r) for i, r in enumerate(rpms)]
+        return FlightData(metadata=FlightMetadata(engine_hours_start=100.0), data_points=pts,
+                          file_path=Path("x.csv"), file_hash="h")
+
+    def _tach(self, rpms, **cfg):
+        from avcardtool.core.config import EngineTimeConfig
+        from avcardtool.flight_data.analyzers.tach import TachCalculator
+        return TachCalculator(EngineTimeConfig(**cfg)).calculate(self._flight(rpms)).increment_hours
+
+    def test_one_hour_at_standard_rpm_is_one_tach_hour(self):
+        assert self._tach([2350] * 3600, reference_rpm=2350) == pytest.approx(1.0)
+
+    def test_g3x_manual_example(self):
+        # "if Standard Recording RPM is set to 2300 ... approximately 0.9 hours ... at 2100 RPM"
+        assert self._tach([2100] * 3600, reference_rpm=2300) == pytest.approx(0.913, abs=0.001)
+
+    def test_below_minimum_recording_rpm_does_not_count(self):
+        assert self._tach([400] * 3600, reference_rpm=2300, minimum_recording_rpm=500) == 0
+
+    def test_default_is_a_standard_rpm_not_redline(self):
+        from avcardtool.core.config import EngineTimeConfig
+        assert EngineTimeConfig().reference_rpm == 2300

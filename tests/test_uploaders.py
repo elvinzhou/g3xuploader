@@ -353,3 +353,74 @@ class TestUploaderIntegration:
             uploader = UploaderClass({'enabled': False})
             assert hasattr(uploader, 'upload_flight')
             assert hasattr(uploader, 'authenticate')
+
+
+class TestCarrydBaseUrl:
+    """base_url lets a test point Carryd uploads at a staging or local server."""
+
+    def _post_url(self, config, flight_data, summary):
+        from unittest.mock import patch, Mock
+        resp = Mock(status_code=200)
+        resp.json.return_value = {"success": True, "aircraft": {"totalTime": 1.0}}
+        with patch("avcardtool.flight_data.uploaders.carryd.requests.post", return_value=resp) as post:
+            CarrydUploader({"enabled": True, "api_key": "eal_x", **config}).upload_flight(flight_data, summary)
+        return post.call_args[0][0]
+
+    def test_defaults_to_carryd_app(self, sample_flight_data, sample_analysis_summary):
+        assert self._post_url({}, sample_flight_data, sample_analysis_summary) == \
+            "https://carryd.app/api/v1/flight-times"
+
+    def test_custom_base_url(self, sample_flight_data, sample_analysis_summary):
+        url = self._post_url({"base_url": "http://127.0.0.1:5173/"},
+                             sample_flight_data, sample_analysis_summary)
+        assert url == "http://127.0.0.1:5173/api/v1/flight-times"
+
+
+class TestCarrydPayload:
+    """What avcardtool sends Carryd, checked against a real G3X log's values."""
+
+    def _send(self, summary, response=None, flight_data=None):
+        from types import SimpleNamespace
+        from unittest.mock import patch, Mock
+        resp = response or Mock(status_code=200)
+        if response is None:
+            resp.json.return_value = {"success": True, "aircraft": {"totalTime": 1.0}}
+        fd = flight_data or SimpleNamespace(file_path="log_20260917_161632_KOAK.csv")
+        with patch("avcardtool.flight_data.uploaders.carryd.requests.post", return_value=resp) as post:
+            result = CarrydUploader({"enabled": True, "api_key": "eal_x",
+                                     "engine_logbooks": ["lb-engine"]}).upload_flight(fd, summary)
+        return post.call_args[1]["json"], result
+
+    SUMMARY = {
+        "aircraft_ident": "N662EZ", "date": "2026-09-17", "utc_offset": "-07:00",
+        "hobbs": {"ending_hours": 124.4694444444444},
+        "tach": {"ending_hours": 126.76333333333},
+        "oooi": {"off_time": "2026-09-17T16:27:01"},
+    }
+
+    def test_recorded_at_carries_the_logs_utc_offset(self):
+        payload, _ = self._send(self.SUMMARY)
+        assert payload["recordedAt"] == "2026-09-17T16:27:01-07:00"
+
+    def test_hours_are_rounded(self):
+        payload, _ = self._send(self.SUMMARY)
+        assert payload["totalTime"] == 124.47
+        assert payload["engineTimes"] == {"lb-engine": 126.76}
+
+    def test_no_offset_known_leaves_time_alone(self):
+        payload, _ = self._send({**self.SUMMARY, "utc_offset": None})
+        assert payload["recordedAt"] == "2026-09-17T16:27:01"
+
+    def test_date_only_fallback_gets_no_offset(self):
+        payload, _ = self._send({**self.SUMMARY, "oooi": None})
+        assert payload["recordedAt"] == "2026-09-17"
+
+    def test_409_reports_carryd_kept_newer_times(self):
+        from unittest.mock import Mock
+        resp = Mock(status_code=409, text="")
+        resp.json.return_value = {"success": False,
+                                  "error": "totalTime 124.47h is lower than N662EZ's current 161.6h"}
+        _, result = self._send(self.SUMMARY, response=resp)
+        assert not result.success
+        assert result.metadata["stale"] is True
+        assert "already has newer times" in result.message

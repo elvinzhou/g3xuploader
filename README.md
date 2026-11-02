@@ -66,9 +66,13 @@ If enabled, avcardtool will parse G3X flight logs, calculate Hobbs and Tach time
 
 | Prompt | Options | Default | Description |
 |--------|---------|---------|-------------|
-| Hobbs time trigger | `oil_pressure`, `rpm`, `flight_time` | `oil_pressure` | What starts the Hobbs clock — oil pressure is most common for certified aircraft |
-| Tach time mode | `variable`, `fixed` | `variable` | `variable` accrues time at the RPM/redline ratio; `fixed` runs 1:1 with the clock whenever the engine is running |
-| Engine redline RPM | integer | `2700` | Only shown for `variable` mode — used as the denominator for tach ratio |
+| Hobbs time trigger | `oil_pressure`, `rpm`, `flight_time` | `oil_pressure` | What starts the Hobbs clock. `oil_pressure` / `rpm` count while the engine runs; `flight_time` counts only while airborne. **Match your avionics' Airframe Time setting** — see [Matching Hobbs and Tach to your avionics](#matching-hobbs-and-tach-to-your-avionics) |
+| Tach time mode | `variable`, `fixed` | `variable` | The G3X's Engine Time *Record Mode*. `variable` accrues time at RPM ÷ Standard Recording RPM; `fixed` runs 1:1 with the clock whenever the engine is above the minimum RPM |
+| Standard Recording RPM | integer | `2300` | `variable` mode only. The RPM at which 1 tach hour accrues per hour — copy it from the G3X's Engine Time setup. **Not redline** — see [Matching Hobbs and Tach to your avionics](#matching-hobbs-and-tach-to-your-avionics) |
+
+> ⚠ **These settings must match your avionics' configuration** (on a G3X:
+> Engine/Airframe configuration → *Airframe Time* and *Engine Time*). When they
+> don't, avcardtool's Hobbs and Tach drift from the avionics' own numbers.
 
 **Upload services** (only shown if flight processing is enabled):
 
@@ -136,6 +140,83 @@ inbox filtering.
 The wizard confirms where to write the config file (default: `~/.config/avcardtool/config.json` for non-root, `/etc/avcardtool/config.json` when running as root) and warns before overwriting an existing file.
 
 The installer then reads the saved config and installs only the systemd services and udev rules needed for the features you enabled — if you enabled neither automated feature, no system-level rules are installed.
+
+## Matching Hobbs and Tach to your avionics
+
+### Where do the Hobbs and Tach numbers come from?
+
+Every G3X log starts with the avionics' own counters in its header:
+
+```
+#airframe_info,...,airframe_hours="161.6",engine_hours="167.5"
+```
+
+Those are authoritative, and avcardtool uses them whenever it has them: each
+flight starts from the hours in its own log's header, and when the newest log
+on the card is a power-up without a flight, its header replaces the newest
+flight's calculated end-of-flight values outright.
+
+avcardtool only **estimates** time for the part the avionics hasn't recorded
+yet — typically the newest flight on a card that was pulled right after
+landing. That estimate is where the Hobbs trigger and Standard Recording RPM
+come in, so they should count time the same way the avionics does.
+
+### What happens when the settings don't match?
+
+The estimate drifts from what the avionics records. Examples from 31 single
+flights on a real G3X Touch card (N662EZ), compared with the hours the G3X
+itself wrote in the next log's header:
+
+**Hobbs.** That G3X's Airframe Time counts only airborne time:
+
+| Hobbs trigger | avcardtool total | G3X total | Difference | Flights within 0.1 h |
+|---|---|---|---|---|
+| `oil_pressure` (default) | 47.05 h | 40.4 h | **+6.65 h (+16%)** | 5 / 31 |
+| `rpm` | 46.99 h | 40.4 h | +6.59 h | 5 / 31 |
+| `flight_time` | 39.40 h | 40.4 h | −1.00 h (−2.5%) | 28 / 31 |
+
+Counting from engine start adds taxi and run-up time the G3X doesn't count, so
+Hobbs was **overestimated** on almost every flight (by up to 0.5 h).
+
+**Tach.** The G3X accrues engine time at RPM ÷ *Standard Recording RPM*
+(2350 on that aircraft); it is not redline:
+
+| Standard Recording RPM | avcardtool total | G3X total | Difference | Flights within 0.1 h |
+|---|---|---|---|---|
+| 2700 (redline) | 36.82 h | 43.3 h | **−6.48 h (−15%)** | 13 / 31 |
+| 2350 (the G3X's setting) | 42.30 h | 43.3 h | −1.00 h (−2.3%) | 28 / 31 |
+
+Using redline **underestimated** tach by about 15%. With matching settings
+both land within the G3X's 0.1 h display resolution on nearly every flight.
+
+### Which settings does my G3X use?
+
+On the G3X, look under Engine/Airframe configuration:
+
+- **Airframe Time** — what starts the airframe (Hobbs) counter. If it counts
+  flight time, use `flight_time`; if it counts while the engine runs, use
+  `oil_pressure` or `rpm`.
+- **Engine Time** — *Record Mode* (`variable` or `fixed`) and, for variable,
+  the *Standard Recording RPM*.
+
+To change them later, rerun `avcardtool setup`, or edit `flight_data.airframe_time.trigger`
+and `flight_data.engine_time.reference_rpm` in the config file.
+
+### What if the estimate ends up higher than the avionics' number?
+
+It corrects itself. Each flight's values start from the hours in its own log's
+header, so the next upload is the avionics' real number plus the new flight —
+on top of the truth, not on top of the earlier estimate. Replaying the logs
+above as if the card were read after every single flight, no upload ever went
+backwards.
+
+The one edge case: if the next flight is shorter than the earlier
+over-estimate, its total would be *lower* than what Carryd already has. Carryd
+refuses uploads that move times backwards, so it keeps the slightly high value
+(avcardtool reports "Carryd already has newer times") and the following flight
+corrects it. A slightly high value is the conservative direction for
+maintenance — items come due a little early, never late. Matching settings
+keep the over-estimate to about 0.1 h.
 
 ## Architecture
 

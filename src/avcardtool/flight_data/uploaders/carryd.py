@@ -18,6 +18,20 @@ logger = logging.getLogger(__name__)
 CARRYD_BASE_URL = "https://carryd.app"
 
 
+def _with_utc_offset(timestamp: Optional[str], utc_offset: Optional[str]) -> Optional[str]:
+    """
+    Add the log's UTC offset to a local ISO timestamp ("2026-09-17T16:27:01"
+    + "-07:00"). Without it Carryd's server reads the time as UTC. Leaves
+    dates, timestamps that already carry a zone, and unknown offsets alone.
+    """
+    if not timestamp or not utc_offset or "T" not in timestamp:
+        return timestamp
+    time_part = timestamp.split("T", 1)[1]
+    if time_part.endswith("Z") or "+" in time_part or "-" in time_part:
+        return timestamp
+    return timestamp + utc_offset
+
+
 class CarrydUploader(FlightDataUploader):
     """
     Upload flight time data to Carryd.
@@ -33,6 +47,8 @@ class CarrydUploader(FlightDataUploader):
             when supplied; useful when multiple aircraft share a tail number.
         engine_logbooks: list[str] - Ordered list of engine logbook UUIDs.
             Index 0 is the primary engine. Omit to update only total time.
+        base_url: str - Carryd server (default https://carryd.app); point it
+            at a staging or local server to test without touching real data.
     """
 
     SERVICE_NAME = "Carryd"
@@ -42,6 +58,7 @@ class CarrydUploader(FlightDataUploader):
         self.api_key = config.get('api_key', '')
         self.aircraft_id: str = config.get('aircraft_id', '')
         self.engine_logbooks: list = config.get('engine_logbooks', [])
+        self.base_url: str = (config.get('base_url') or CARRYD_BASE_URL).rstrip('/')
 
     # def get_current_times(
     #     self,
@@ -148,7 +165,7 @@ class CarrydUploader(FlightDataUploader):
         engine_times = {}
         tach = analysis_results.get('tach')
         if tach and self.engine_logbooks:
-            engine_times[self.engine_logbooks[0]] = tach['ending_hours']
+            engine_times[self.engine_logbooks[0]] = round(tach['ending_hours'], 2)
 
         # Prefer wheels-off time for recordedAt, fall back to out_time then date
         recorded_at = None
@@ -157,9 +174,10 @@ class CarrydUploader(FlightDataUploader):
             recorded_at = oooi.get('off_time') or oooi.get('out_time')
         if not recorded_at:
             recorded_at = analysis_results.get('date')
+        recorded_at = _with_utc_offset(recorded_at, analysis_results.get('utc_offset'))
 
         # aircraftId takes precedence over registration when both are available
-        payload: dict = {"totalTime": hobbs['ending_hours']}
+        payload: dict = {"totalTime": round(hobbs['ending_hours'], 2)}
         if self.aircraft_id:
             payload["aircraftId"] = self.aircraft_id
         else:
@@ -202,7 +220,7 @@ class CarrydUploader(FlightDataUploader):
 
         try:
             response = requests.post(
-                f"{CARRYD_BASE_URL}/api/v1/flight-times",
+                f"{self.base_url}/api/v1/flight-times",
                 headers={
                     "Authorization": f"Bearer {self.api_key}",
                     "Content-Type": "application/json",
@@ -228,6 +246,18 @@ class CarrydUploader(FlightDataUploader):
                     service=self.SERVICE_NAME,
                     message="Upload successful",
                     metadata={"aircraft": aircraft}
+                )
+            elif response.status_code == 409:
+                # Carryd refuses times lower than it already has — this card is
+                # older than the last upload. Expected after re-reading an old
+                # card, so a warning, and nothing on Carryd changed.
+                error = body.get('error') or response.text
+                logger.warning(f"Carryd kept its newer times: {error}")
+                return UploadResult(
+                    success=False,
+                    service=self.SERVICE_NAME,
+                    message=f"Not updated — Carryd already has newer times ({error})",
+                    metadata={"stale": True},
                 )
             else:
                 error = body.get('error') or response.text
