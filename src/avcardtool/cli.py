@@ -1365,6 +1365,12 @@ def navdata_download(ctx, aircraft: int, device: Optional[int], series: Optional
                 "aircraft": ac.tail_number,
                 "card_serial": card_serial,   # used by install to derive vol_id for feat_unlk.dat
                 "system_ids": system_ids,      # avionics hardware IDs for feat_unlk.dat
+                # device_id → System ID, so install signs with the card's own device
+                "device_system_ids": {
+                    str(dev.device_id): dev.system_id_raw
+                    for dev, _, _, _ in plan
+                    if dev.system_id_raw is not None
+                },
                 "batch_id": batch_id,          # used by install for PUT /devices/installed-issues
                 "device_database_type": primary_db_type,  # TAW db_type for this avionics unit
                 "device_type_map": device_type_map,        # name → productID for all devices
@@ -1586,6 +1592,75 @@ def _link_or_copy(src: Path, dst: Path) -> None:
         _shutil.copy2(src, dst)
 
 
+# Word identifying each database type in a GarminDevice.xml <Description>,
+# e.g. "AOPA US Directory Data 26D4" for Airport Directory. Defaults to the
+# type's own name ("Worldwide-9 Terrain 20T1", "US SafeTaxi 26S4", ...).
+_DEVICE_XML_KEYWORDS = {"Airport Directory": "Directory"}
+
+
+def _cycles_on_display(sd_card: Path) -> list:
+    """
+    Database descriptions the avionics reports as loaded, from the card's
+    Garmin/GarminDevice.xml (written by the display itself), e.g.
+    ["USA-VFR Navigation Data 2607", "Worldwide-9 Terrain 20T1", ...].
+    """
+    import xml.etree.ElementTree as ET
+
+    xml_path = sd_card / "Garmin" / "GarminDevice.xml"
+    if not xml_path.exists():
+        return []
+    try:
+        root = ET.parse(xml_path).getroot()
+    except Exception as e:
+        click.echo(f"Warning: could not read {xml_path.name} ({e})", err=True)
+        return []
+    descriptions = []
+    for el in root.iter():
+        if el.tag.endswith("UpdateFile"):
+            for child in el:
+                if child.tag.endswith("Description") and (child.text or "").strip():
+                    descriptions.append(child.text.strip())
+    return descriptions
+
+
+def _on_display(entry: dict, descriptions: list) -> bool:
+    """True if the display already has this entry's database at this cycle."""
+    issue = entry.get("issue_name", "")
+    avdb = entry.get("avdb_type", "")
+    keyword = _DEVICE_XML_KEYWORDS.get(avdb, avdb).lower()
+    return bool(issue) and any(
+        d.split()[-1] == issue and keyword in d.lower() for d in descriptions
+    )
+
+
+def _system_id_for_card(manifest: dict, entries: list) -> int:
+    """
+    The avionics System ID to sign this card's feat_unlk.dat slots with.
+
+    An aircraft can have several devices (e.g. a G3X Touch and a GTN), each
+    with its own System ID, and the display rejects slots signed with
+    another unit's ID. Use the ID of the device the installed entries belong
+    to; fall back to the manifest's only ID, or (with a warning) its first.
+    """
+    by_device = manifest.get("device_system_ids") or {}
+    ids = {by_device[str(e.get("device_id"))] for e in entries
+           if str(e.get("device_id")) in by_device}
+    if len(ids) == 1:
+        return ids.pop()
+    system_ids = manifest.get("system_ids", [])
+    if len(system_ids) == 1:
+        return system_ids[0]
+    if system_ids:
+        click.echo(
+            "Warning: the download lists several avionics System IDs and doesn't say "
+            "which belongs to this card's device — using the first. Re-run "
+            "'avcardtool navdata download' to record them per device.",
+            err=True,
+        )
+        return system_ids[0]
+    return 0
+
+
 def _filter_entries_for_avionics(entries: list, target_db_type: int) -> tuple:
     """
     Split manifest entries into (for this card's avionics, for other avionics).
@@ -1794,6 +1869,19 @@ def navdata_install(ctx, sd_card: Optional[Path], from_dir: Optional[Path], yes:
             err=True,
         )
         sys.exit(1)
+    # Skip databases the display already has at this cycle, as GADM does
+    # (e.g. terrain 20T1, which never changes, is not re-installed).
+    on_display = _cycles_on_display(sd_card)
+    already = [e for e in entries if _on_display(e, on_display)]
+    if already:
+        names = sorted({f"{e['avdb_type']} {e['issue_name']}" for e in already})
+        click.echo("Already on the display (per Garmin/GarminDevice.xml), skipping: "
+                   + ", ".join(names))
+        entries = [e for e in entries if e not in already]
+    if not entries:
+        click.echo("Everything in the download is already on the display — nothing to install.")
+        sys.exit(0)
+
     # Every later step (cleanup, feat_unlk.dat, flyGarmin install report)
     # must only see this card's databases.
     manifest = {**manifest, "entries": entries}
@@ -1942,9 +2030,7 @@ def navdata_install(ctx, sd_card: Optional[Path], from_dir: Optional[Path], yes:
         click.echo("\nWarning: cannot determine SD card volume serial — "
                    "feat_unlk.dat and .evidf.dat will not be written.", err=True)
     else:
-        # Use the first system_id available (typically one device per aircraft)
-        system_ids = manifest.get("system_ids", [])
-        system_id: int = system_ids[0] if system_ids else 0
+        system_id: int = _system_id_for_card(manifest, entries)
         if system_id:
             click.echo(f"Avionics System ID: 0x{system_id:X} "
                        f"→ feat_unlk value 0x{truncate_system_id(system_id):08X}")
@@ -1958,7 +2044,9 @@ def navdata_install(ctx, sd_card: Optional[Path], from_dir: Optional[Path], yes:
         for installed_file in installed_files:
             # security_id comes from the TAW header (database_type field).
             # We stored it per-entry when building extracted_security_ids above.
-            entry_sec_id = _extracted_security_ids.get(str(installed_file), 0)
+            # Files copied rather than extracted from a TAW (e.g. a rasters
+            # file served as-is) belong to this card's avionics too.
+            entry_sec_id = _extracted_security_ids.get(str(installed_file), target_db_type)
             if write_feat_unlk_for_file(sd_card, installed_file, vol_id,
                                         entry_sec_id, system_id):
                 feat_unlk_count += 1

@@ -97,12 +97,14 @@ class Feature(Enum):
     OBSTACLE     = ( 2739,  4, ['terrain.odb', 'obstacle.odb'])
     APT_TERRAIN  = ( 3652,  5, ['terrain.adb'])
     SAFETAXI     = ( 5478,  7, ['safetaxi.bin', 'safetaxi.img'])
-    FLITE_CHARTS = ( 6391,  8, ['fc_tpc/fc_tpc.dat', 'fc_tpc.dat',
-                                'fc_tpc/fc_tpc.fca'])
+    # One signing file per feature: GADM signs FLITE_CHARTS with fc_tpc.dat
+    # (not fc_tpc.fca) and SECTIONALS with rasters.xml (not rasters.hif) —
+    # verified against a GADM-written card. Listing both made whichever file
+    # was installed last overwrite the slot with the wrong CRC.
+    FLITE_CHARTS = ( 6391,  8, ['fc_tpc/fc_tpc.dat', 'fc_tpc.dat'])
     BASEMAP      = ( 7304, 10, ['bmap.bin'])
     AIRPORT_DIR  = ( 8217, 10, ['apt_dir.gca', 'fbo.gpi'])
-    SECTIONALS   = (10956, 10, ['rasters/rasters.xml', 'rasters.xml',
-                                'rasters/rasters.hif', 'rasters/rasters.hif'])
+    SECTIONALS   = (10956, 10, ['rasters/rasters.xml', 'rasters.xml'])
 
     def __init__(self, offset: int, bit: int, filenames: list):
         self.offset = offset
@@ -147,16 +149,20 @@ def parse_system_id(value) -> Optional[int]:
     """
     Convert a Garmin avionics System ID to the raw integer used by feat_unlk.dat.
 
-    Garmin System IDs are **hexadecimal** — the same value the avionics unit
-    reports in its logs (``system_id="60002CA61BD97"`` in a G3X CSV) and that the
-    G3X validates the feat_unlk.dat slot against.  The flyGarmin API returns this
-    identifier as ``device.systemId`` (and the batch-update plan as
-    ``device.serial``), sometimes as a JSON number and sometimes as a string.
+    The same ID appears in two notations:
+      * the flyGarmin API returns it in **decimal** — ``device.systemId`` is
+        e.g. ``"1688861845601687"`` (sometimes a JSON number);
+      * the avionics writes it in **hex** in its CSV logs —
+        ``system_id="60002CA61BD97"`` — which is the same value
+        (1688861845601687 == 0x60002CA61BD97).
+
+    Verified against a GADM-written feat_unlk.dat: only the decimal reading
+    of the API value reproduces the slot's System ID (0xCA67BD99).
 
     Accepts:
-      * ``int``  → used as-is (already the numeric hardware ID)
-      * ``str``  → parsed as base-16, tolerating an optional ``0x`` prefix
-                   (e.g. ``"60002CA61BD97"`` → ``0x60002CA61BD97``)
+      * ``int`` → used as-is
+      * ``str`` of digits only → decimal (the API's form)
+      * ``str`` with a ``0x`` prefix or hex letters → hex (the log's form)
 
     Returns the integer, or ``None`` if the value is empty or unparseable.
     """
@@ -165,16 +171,18 @@ def parse_system_id(value) -> Optional[int]:
     if isinstance(value, bool):  # bool is an int subclass; never a system ID
         return None
     if isinstance(value, int):
-        return value
+        return value or None
     s = str(value).strip()
     if not s or s == "0":
         return None
-    if s.lower().startswith("0x"):
-        s = s[2:]
     try:
+        if s.lower().startswith("0x"):
+            return int(s[2:], 16)
+        if s.isdigit():
+            return int(s, 10)
         return int(s, 16)
     except ValueError:
-        logger.warning(f"parse_system_id: could not parse System ID {value!r} as hex")
+        logger.warning(f"parse_system_id: could not parse System ID {value!r}")
         return None
 
 
@@ -341,7 +349,7 @@ def write_feat_unlk_for_file(
     feature = FILENAME_TO_FEATURE.get(rel_str)
     if feature is None:
         # Individual raster tiles (.jnx) never have unlock entries — only the
-        # manifest (rasters.xml / rasters.hif) does.  Suppress the per-tile
+        # raster index (rasters.xml) does.  Suppress the per-tile
         # message to avoid log spam; log anything else as before.
         if not rel_str.lower().endswith('.jnx'):
             logger.debug(f"feat_unlk: no feature for {rel_str}, skipping")
