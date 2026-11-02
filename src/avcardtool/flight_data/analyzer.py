@@ -122,6 +122,8 @@ class FlightDataAnalyzer:
         summary = {
             "aircraft_ident": analysis.aircraft_ident,
             "date": analysis.date,
+            # OOOI times below are the log's local time; this is their UTC offset
+            "utc_offset": flight_data.metadata.additional.get("utc_offset"),
             "file_path": analysis.file_path,
             "file_hash": analysis.file_hash,
             "is_flight": analysis.detection.is_flight,

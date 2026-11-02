@@ -5,6 +5,7 @@ Parses Garmin G3X Touch CSV log files and extracts flight data.
 """
 
 import csv
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Dict
@@ -53,11 +54,16 @@ class GarminG3XProcessor(FlightDataProcessor):
         'tas': 'True Airspeed',
         'pitch': 'Pitch',
         'roll': 'Roll',
+        'utc_offset': 'UTC Offset',
     }
+
+    # Columns some logs don't have; their absence isn't worth a warning
+    OPTIONAL_COLUMNS = {'utc_offset'}
 
     def __init__(self):
         super().__init__()
         self.column_indices = {}
+        self._utc_offset: Optional[str] = None
 
     def get_name(self) -> str:
         """Get the name of this processor."""
@@ -90,7 +96,12 @@ class GarminG3XProcessor(FlightDataProcessor):
         metadata = self.extract_metadata(file_path)
 
         # Map columns and parse data points
+        self._utc_offset = None
         data_points = self._parse_data_points(file_path)
+        # The log's "Time" column is local time; this is its offset from UTC
+        # (e.g. "-07:00"), so times sent to services can carry it.
+        if self._utc_offset:
+            metadata.additional["utc_offset"] = self._utc_offset
 
         # Calculate file hash
         file_hash = hash_file(file_path)
@@ -176,7 +187,8 @@ class GarminG3XProcessor(FlightDataProcessor):
                     break
         
         # Log missing columns
-        missing = [name for name in self.COLUMN_MAP if name not in self.column_indices]
+        missing = [name for name in self.COLUMN_MAP
+                   if name not in self.column_indices and name not in self.OPTIONAL_COLUMNS]
         if missing:
             logger.warning(f"Missing columns in CSV: {missing}")
 
@@ -219,6 +231,11 @@ class GarminG3XProcessor(FlightDataProcessor):
 
         date_str = get_val('date')
         time_str = get_val('time')
+
+        if self._utc_offset is None:
+            offset = get_val('utc_offset')
+            if re.fullmatch(r'[+-]\d{2}:\d{2}', offset):
+                self._utc_offset = offset
         
         # Handle cases where date/time might have extra quotes or be empty
         if not date_str or not time_str:

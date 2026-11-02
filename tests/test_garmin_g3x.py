@@ -329,3 +329,28 @@ class TestCompleteAnalysis:
         # Analysis should complete successfully without any upload service configured
         assert analysis.detection.is_flight
         # No assertions about uploads - they're not implemented yet
+
+
+def test_utc_offset_is_read_from_the_log(tmp_path):
+    """The log's local times carry an offset; it's kept for services that need UTC."""
+    from avcardtool.flight_data import GarminG3XProcessor, FlightDataAnalyzer
+    from avcardtool.core.config import FlightDataConfig
+    sample = Path(__file__).parent / "test_data" / "sample_flight.csv"
+    fd = GarminG3XProcessor().parse_log(sample)
+    assert fd.metadata.additional["utc_offset"] == "-05:00"
+    assert FlightDataAnalyzer(FlightDataConfig()).analyze_summary(fd)["utc_offset"] == "-05:00"
+
+
+def test_log_without_utc_offset_column(tmp_path):
+    from avcardtool.flight_data import GarminG3XProcessor
+    sample = Path(__file__).parent / "test_data" / "sample_flight.csv"
+    lines = sample.read_text().splitlines()
+    cols = lines[1].split(",")
+    drop = next(i for i, c in enumerate(cols) if "UTC Offset" in c)
+    trimmed = [lines[0]] + [",".join(v for i, v in enumerate(l.split(",")) if i != drop)
+                            for l in lines[1:]]
+    log = tmp_path / "log_20260101_000000_KXXX.csv"
+    log.write_text("\n".join(trimmed) + "\n")
+    fd = GarminG3XProcessor().parse_log(log)
+    assert "utc_offset" not in fd.metadata.additional
+    assert fd.data_points  # still parses normally
