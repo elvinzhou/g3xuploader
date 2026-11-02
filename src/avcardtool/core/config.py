@@ -264,9 +264,11 @@ class Config:
         back by save(), so a dry-run invocation of a command that saves the
         config cannot leave production silently in dry-run mode.
         """
+        # setdefault: the setup wizard builds Config via __new__, skipping __init__
+        originals = self.__dict__.setdefault("_system_overrides", {})
         for key, value in values.items():
-            if key not in self._system_overrides:
-                self._system_overrides[key] = getattr(self.system, key)
+            if key not in originals:
+                originals[key] = getattr(self.system, key)
             setattr(self.system, key, value)
 
     def save(self, path: Optional[Path] = None) -> None:
@@ -311,7 +313,7 @@ class Config:
                 "garmin": self.navdata.garmin
             },
             "notifications": asdict(self.notifications),
-            "system": {**asdict(self.system), **self._system_overrides}
+            "system": {**asdict(self.system), **getattr(self, "_system_overrides", {})}
         }
 
     def _is_legacy_config(self, data: Dict[str, Any]) -> bool:
