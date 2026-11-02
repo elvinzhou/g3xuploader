@@ -8,6 +8,7 @@ Stdlib only (smtplib/ssl/email). Connection security follows the config:
   - no TLS                       -> allowed only for localhost relays
 """
 
+import re
 import smtplib
 import ssl
 from email.message import EmailMessage
@@ -29,6 +30,27 @@ _SUBJECT_PREFIX = {
 
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
+_GOOGLE_SMTP_DOMAINS = ("gmail.com", "googlemail.com")
+
+
+def is_gmail_host(smtp_host: str) -> bool:
+    """True for Google's SMTP servers (smtp.gmail.com and friends)."""
+    host = (smtp_host or "").strip().lower().rstrip(".")
+    return any(host == d or host.endswith("." + d) for d in _GOOGLE_SMTP_DOMAINS)
+
+
+def normalize_password(password: str, smtp_host: str) -> str:
+    """
+    Remove spaces from a Gmail password; leave any other server's as typed.
+
+    Gmail's SMTP server only accepts app passwords, which Google displays
+    as four groups of four letters ("abcd efgh ijkl mnop") — the spaces are
+    display-only. Other providers allow real spaces in passwords.
+    """
+    if not is_gmail_host(smtp_host):
+        return password
+    return re.sub(r"\s+", "", password)
+
 
 class EmailBackend(NotificationBackend):
     name = "email"
@@ -39,7 +61,7 @@ class EmailBackend(NotificationBackend):
         self.smtp_port = int(config.get("smtp_port", 587))
         self.use_tls = bool(config.get("use_tls", True))
         self.username = config.get("username", "")
-        self.password = config.get("password", "")
+        self.password = normalize_password(config.get("password", ""), self.smtp_host)
         self.from_addr = config.get("from_addr", "")
         to_addrs = config.get("to_addrs", [])
         if isinstance(to_addrs, str):

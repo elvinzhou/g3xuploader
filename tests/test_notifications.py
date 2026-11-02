@@ -9,7 +9,7 @@ import pytest
 from avcardtool.core.config import Config, NotificationsConfig
 from avcardtool.notifications import BACKENDS, NotificationManager
 from avcardtool.notifications import events as ev
-from avcardtool.notifications.backends.email_smtp import EmailBackend
+from avcardtool.notifications.backends.email_smtp import EmailBackend, normalize_password
 from avcardtool.notifications.base import (
     NotificationBackend,
     NotificationEvent,
@@ -45,6 +45,44 @@ def make_event(severity=Severity.INFO, event_type="test"):
 # ============================================================================
 # EmailBackend
 # ============================================================================
+
+class TestNormalizePassword:
+
+    @pytest.mark.parametrize("host", [
+        "smtp.gmail.com", "SMTP.Gmail.com", "smtp.gmail.com.", "smtp-relay.gmail.com",
+        "smtp.googlemail.com", " smtp.gmail.com ",
+    ])
+    def test_gmail_hosts(self, host):
+        assert normalize_password("abcd efgh ijkl mnop", host) == "abcdefghijklmnop"
+
+    @pytest.mark.parametrize("given", [
+        "abcd efgh ijkl mnop",                      # as Google displays it
+        "  abcd efgh ijkl mnop  ",                  # stray whitespace around a paste
+        "abcd\u00a0efgh\u00a0ijkl\u00a0mnop",       # non-breaking spaces from a web page
+        "abcdefghijklmnop",                         # already compact
+    ])
+    def test_gmail_spaces_removed(self, given):
+        assert normalize_password(given, "smtp.gmail.com") == "abcdefghijklmnop"
+
+    @pytest.mark.parametrize("host", [
+        "smtp.office365.com", "smtp.fastmail.com", "localhost", "",
+        "notgmail.com", "smtp.gmail.com.example.net",   # look-alikes aren't Google
+    ])
+    def test_other_servers_untouched(self, host):
+        for password in ("correct horse battery staple", "abcd efgh ijkl mnop", " secret "):
+            assert normalize_password(password, host) == password
+
+    @mock.patch("avcardtool.notifications.backends.email_smtp.smtplib.SMTP")
+    def test_backend_strips_for_gmail(self, smtp_cls):
+        EmailBackend(email_config(smtp_host="smtp.gmail.com",
+                                  password="abcd efgh ijkl mnop")).send(make_event())
+        smtp_cls.return_value.login.assert_called_once_with("user@example.com", "abcdefghijklmnop")
+
+    @mock.patch("avcardtool.notifications.backends.email_smtp.smtplib.SMTP")
+    def test_backend_keeps_spaces_elsewhere(self, smtp_cls):
+        EmailBackend(email_config(password="correct horse battery staple")).send(make_event())
+        smtp_cls.return_value.login.assert_called_once_with("user@example.com", "correct horse battery staple")
+
 
 class TestEmailBackend:
 

@@ -343,3 +343,29 @@ def test_navdata_dry_run_report_skips_crc_matches(tmp_path, capsys):
     assert "Obstacle" not in out.split("Subject:")[1]
     logged = " ".join(str(c.args[0]) for c in log.info.call_args_list)
     assert "Obstacle/2610: feat_unlk CRC matches cache — would skip" in logged
+
+
+def test_config_built_without_init_can_be_saved(tmp_path):
+    """The setup wizard builds Config via Config.__new__ (skipping __init__)
+    and then saves it; that must not depend on __init__-only attributes."""
+    from avcardtool.core.config import (
+        FlightDataConfig, NavdataConfig, NotificationsConfig, SystemConfig,
+    )
+    cfg = Config.__new__(Config)
+    cfg.config_path = tmp_path / "config.json"
+    cfg.flight_data = FlightDataConfig()
+    cfg.navdata = NavdataConfig()
+    cfg.notifications = NotificationsConfig()
+    cfg.system = SystemConfig()
+    cfg.system.data_dir = str(tmp_path / "data")
+
+    cfg.save(cfg.config_path)
+
+    saved = json.loads(cfg.config_path.read_text())
+    assert saved["system"]["data_dir"] == str(tmp_path / "data")
+    assert saved["system"]["dry_run"] is False
+
+    # Overrides still work (and still aren't saved) on such an object
+    cfg.override_system(dry_run=True)
+    assert cfg.system.dry_run is True
+    assert cfg.to_dict()["system"]["dry_run"] is False
