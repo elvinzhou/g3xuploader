@@ -79,9 +79,7 @@ If enabled, avcardtool will parse G3X flight logs, calculate Hobbs and Tach time
 You are asked whether to enable each service. Only enabled services will receive uploads when your SD card is inserted.
 
 - **CloudAhoy** — API token (Bearer token from your CloudAhoy account)
-- **FlySto** — OAuth2 Client ID and Client Secret (from FlySto developer settings), redirect URI (default: `http://localhost:8080/callback`). The wizard prints the authorization URL and offers to complete the OAuth code exchange inline. You can skip this and authorize later with `avcardtool flight flysto-auth <code>`.
-
-  **Advanced — auth relay (`auth_relay_url`):** for headless devices such as a Raspberry Pi, you can set `auth_relay_url` under `flight_data.uploaders.flysto` to the URL of a FlySto auth relay (a small Cloudflare Worker, source in [`relay/`](relay/)). The relay holds the client secret, so `client_id`/`client_secret` are not needed on the device. Pair with `avcardtool flight flysto-login` (shows a link, and a QR code if the optional `qrcode` package is installed), then open it on your phone. Flight logs are still uploaded directly to FlySto and never pass through the relay. Leave this empty unless you know you need it.
+- **FlySto** — an API token, created at <https://www.flysto.net/account/api> (sent as a Bearer token). Before uploading, FlySto's logs API is queried for its most recent log, and only flights dated (UTC) after that day are uploaded — this assumes the SD card is loaded about once a day. Set `check_duplicates: false` under the flysto uploader to turn this off. Assumptions and trade-offs are logged in [FLYSTO_UPLOAD_DESIGN.md](FLYSTO_UPLOAD_DESIGN.md). Legacy OAuth settings (client ID/secret, `flysto-auth`) still work if no token is set.
 - **Savvy Aviation** — No credentials required. Files are staged locally at `<data_dir>/savvy_staging/` for manual upload via their website.
 - **Carryd** — API key (format: `eal_...`, obtained from the Carryd dashboard under **Settings → API Keys**) and an optional comma-separated list of engine logbook UUIDs (found under **Logbook → Settings**). Omit logbook UUIDs to update total airframe time only.
 
@@ -237,7 +235,7 @@ avcardtool setup                          # Interactive setup wizard
 # Flight data commands
 avcardtool flight analyze LOG_FILE        # Analyze single log
 avcardtool flight upload LOG_FILE         # Upload a single log to enabled services
-avcardtool flight flysto-auth <code>      # Complete FlySto OAuth after setup
+avcardtool flight flysto-auth <code>      # Legacy OAuth only (not needed with an API token)
 avcardtool flight list-processors         # List supported formats
 avcardtool flight list-uploaders          # Show configured upload services
 
