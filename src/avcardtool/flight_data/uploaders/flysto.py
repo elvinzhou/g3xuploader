@@ -23,30 +23,19 @@ class FlyStoUploader(FlightDataUploader):
     """
     Upload flight data to FlySto (flysto.net).
 
-    FlySto uses OAuth2 authentication. To use this uploader:
-    1. Contact FlySto to register your application and get client_id and client_secret
-    2. Complete the OAuth flow once to get refresh_token
-    3. The uploader will automatically refresh access tokens as needed
+    Authentication (recommended): a static API token.
+    Generate one at https://www.flysto.net/account/api and set it as
+    `api_token`. It is sent as `Authorization: Bearer <token>`; nothing else
+    is needed.
 
-    OAuth Flow (one-time setup):
-    1. Open browser: https://www.flysto.net/oauth/authorize?response_type=code&client_id=<app-id>&redirect_uri=<redirect-uri>
-    2. User grants permission, redirected to: <redirect-uri>?code=<AUTHORIZATION_CODE>
-    3. Exchange code for tokens (see exchange_code_for_tokens method)
-    4. Store refresh_token in config
+    Legacy OAuth2 (client_id / client_secret / refresh_token) is still
+    accepted when no api_token is set.
 
     Configuration:
         enabled: bool - Enable/disable this uploader
-        client_id: str - OAuth2 client ID
-        client_secret: str - OAuth2 client secret
-        redirect_uri: str - OAuth2 redirect URI (default: http://localhost:8080/callback)
-        refresh_token: str - OAuth2 refresh token (obtained during initial setup)
-        auth_relay_url: str - ADVANCED. Base URL of an auth relay (see relay/).
-            Leave empty unless you know you need it. When set, login and token
-            refresh go through the relay, which holds the client secret, so
-            client_id/client_secret are not needed on this device (useful for
-            headless devices such as a Raspberry Pi). Flight logs are still
-            uploaded directly to FlySto and never pass through the relay.
-            Run `avcardtool flight flysto-login` to pair the device.
+        api_token: str - FlySto API token (https://www.flysto.net/account/api)
+        client_id, client_secret, redirect_uri, refresh_token:
+            legacy OAuth2 settings, only used when api_token is empty
     """
 
     OAUTH_TOKEN_URL = "https://www.flysto.net/oauth/token"
@@ -64,10 +53,10 @@ class FlyStoUploader(FlightDataUploader):
         self.client_id = config.get('client_id', '')
         self.client_secret = config.get('client_secret', '')
         self.redirect_uri = config.get('redirect_uri', 'http://localhost:8080/callback')
-        # ADVANCED: optional auth relay; empty means the direct OAuth flow.
-        self.auth_relay_url = (config.get('auth_relay_url') or '').strip().rstrip('/')
+        # Static API token (preferred). When set, OAuth is not used at all.
+        self.api_token = (config.get('api_token') or '').strip()
 
-        # Tokens - can be provided in config or loaded from token file
+        # Legacy OAuth tokens - from config or the token file
         self.access_token = config.get('access_token', '')
         self.refresh_token = config.get('refresh_token', '')
         self.token_expires_at = 0
@@ -77,7 +66,7 @@ class FlyStoUploader(FlightDataUploader):
         self.token_file = Path(data_dir) / 'flysto_tokens.json'
 
         # Try to load tokens from file if not in config
-        if not self.access_token or not self.refresh_token:
+        if not self.api_token and (not self.access_token or not self.refresh_token):
             self._load_tokens()
 
     def _load_tokens(self):
@@ -116,24 +105,17 @@ class FlyStoUploader(FlightDataUploader):
             return False
 
         try:
-            if self.auth_relay_url:
-                response = requests.post(
-                    f"{self.auth_relay_url}/api/token/refresh",
-                    json={'refresh_token': self.refresh_token},
-                    timeout=30
-                )
-            else:
-                response = requests.post(
-                    self.OAUTH_TOKEN_URL,
-                    headers={'Content-Type': 'application/x-www-form-urlencoded'},
-                    data={
-                        'grant_type': 'refresh_token',
-                        'client_id': self.client_id,
-                        'client_secret': self.client_secret,
-                        'refresh_token': self.refresh_token
-                    },
-                    timeout=30
-                )
+            response = requests.post(
+                self.OAUTH_TOKEN_URL,
+                headers={'Content-Type': 'application/x-www-form-urlencoded'},
+                data={
+                    'grant_type': 'refresh_token',
+                    'client_id': self.client_id,
+                    'client_secret': self.client_secret,
+                    'refresh_token': self.refresh_token
+                },
+                timeout=30
+            )
 
             if response.status_code == 200:
                 token_data = response.json()
@@ -158,9 +140,15 @@ class FlyStoUploader(FlightDataUploader):
 
     def _ensure_valid_token(self) -> bool:
         """Ensure we have a valid access token, refreshing if necessary"""
+        if self.api_token:
+            return True
         if not self.access_token or time.time() >= self.token_expires_at:
             return self._refresh_access_token()
         return True
+
+    def _bearer(self) -> str:
+        """The bearer token to send: the API token, else the OAuth access token."""
+        return self.api_token or self.access_token
 
     def authenticate(self) -> bool:
         """
@@ -169,8 +157,11 @@ class FlyStoUploader(FlightDataUploader):
         Returns:
             True if credentials are valid and we can obtain a valid access token
         """
-        if not self.auth_relay_url and (not self.client_id or not self.client_secret):
-            logger.error("FlySto client_id and client_secret not configured")
+        if self.api_token:
+            return True
+
+        if not self.client_id or not self.client_secret:
+            logger.error("FlySto api_token not configured (create one at https://www.flysto.net/account/api)")
             return False
 
         if not self.refresh_token:
@@ -238,66 +229,6 @@ class FlyStoUploader(FlightDataUploader):
             logger.error(error_msg)
             return False, error_msg
 
-    def login_via_relay(self, timeout: int = 300, poll_interval: float = 2.0,
-                        echo=print) -> Tuple[bool, str]:
-        """
-        Pair this device through the auth relay (ADVANCED, auth_relay_url).
-
-        Starts a session on the relay, shows a link (and a QR code when the
-        optional `qrcode` package is installed), then polls until the user has
-        authorized FlySto in a browser on another device.
-
-        Returns:
-            Tuple of (success, message)
-        """
-        if not self.auth_relay_url:
-            return False, "auth_relay_url is not configured"
-
-        try:
-            response = requests.post(f"{self.auth_relay_url}/api/session/new", timeout=30)
-            response.raise_for_status()
-            session = response.json()
-            session_id = session['session_id']
-            auth_url = session['auth_url']
-        except Exception as e:
-            return False, f"Could not start relay session: {e}"
-
-        try:
-            import qrcode
-            qr = qrcode.QRCode(version=1, error_correction=qrcode.constants.ERROR_CORRECT_L,
-                               box_size=1, border=2)
-            qr.add_data(auth_url)
-            qr.make(fit=True)
-            qr.print_ascii(invert=True)
-        except ImportError:
-            pass
-        echo(f"\nOpen this link on your phone or laptop to authorize FlySto:\n{auth_url}\n")
-
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            time.sleep(poll_interval)
-            try:
-                poll = requests.get(f"{self.auth_relay_url}/api/session/poll",
-                                    params={'session_id': session_id}, timeout=30)
-            except requests.RequestException as e:
-                logger.debug(f"Relay poll error (will retry): {e}")
-                continue
-            if poll.status_code == 404:
-                return False, "Session expired. Please run login again."
-            if poll.status_code != 200:
-                continue
-            data = poll.json()
-            if data.get('status') == 'complete':
-                tokens = data.get('tokens', {})
-                self.access_token = tokens.get('access_token', '')
-                self.refresh_token = tokens.get('refresh_token', '')
-                self.token_expires_at = tokens.get('expires_at', time.time() + 3600) - 60
-                self._save_tokens()
-                return True, "Authorization complete! Device successfully linked."
-            if data.get('status') == 'expired':
-                return False, "Session expired. Please run login again."
-        return False, "Timed out waiting for authorization."
-
     def _build_zip_payload(self, flight_data: FlightData) -> bytes:
         """Build the ZIP payload that would be sent to FlySto."""
         with tempfile.NamedTemporaryFile(suffix='.zip', delete=False) as tmp_zip:
@@ -347,21 +278,14 @@ class FlyStoUploader(FlightDataUploader):
             except Exception as e:
                 logger.warning(f"[DEBUG] Could not build FlySto debug payload: {e}")
 
-        if not self.auth_relay_url and (not self.client_id or not self.client_secret):
+        if not self.api_token and (not self.client_id or not self.client_secret):
             return UploadResult(
                 success=False,
                 service=self.SERVICE_NAME,
-                message="FlySto client_id and client_secret not configured"
+                message="FlySto api_token not configured (create one at https://www.flysto.net/account/api)"
             )
 
-        if not self.refresh_token and self.auth_relay_url:
-            return UploadResult(
-                success=False,
-                service=self.SERVICE_NAME,
-                message="FlySto not authorized. Run: avcardtool flight flysto-login"
-            )
-
-        if not self.refresh_token:
+        if not self.api_token and not self.refresh_token:
             # Provide setup instructions
             auth_url = self.get_authorization_url()
             return UploadResult(
@@ -394,7 +318,7 @@ class FlyStoUploader(FlightDataUploader):
             response = requests.post(
                 self.UPLOAD_URL,
                 headers={
-                    'Authorization': f'Bearer {self.access_token}',
+                    'Authorization': f'Bearer {self._bearer()}',
                     'Content-Type': 'application/zip'
                 },
                 data=zip_content,
@@ -408,6 +332,10 @@ class FlyStoUploader(FlightDataUploader):
                     service=self.SERVICE_NAME,
                     message="Upload successful"
                 )
+            elif response.status_code == 401 and self.api_token:
+                error_msg = "Authentication failed: FlySto rejected the API token (401). Check api_token."
+                logger.error(f"FlySto {error_msg}")
+                return UploadResult(success=False, service=self.SERVICE_NAME, message=error_msg)
             elif response.status_code == 401:
                 # Token might have expired, try refreshing
                 if self._refresh_access_token():
@@ -415,7 +343,7 @@ class FlyStoUploader(FlightDataUploader):
                     response = requests.post(
                         self.UPLOAD_URL,
                         headers={
-                            'Authorization': f'Bearer {self.access_token}',
+                            'Authorization': f'Bearer {self._bearer()}',
                             'Content-Type': 'application/zip'
                         },
                         data=zip_content,
