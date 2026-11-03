@@ -11,7 +11,7 @@ import time
 import zipfile
 import tempfile
 import requests
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -35,9 +35,10 @@ class FlyStoUploader(FlightDataUploader):
     Configuration:
         enabled: bool - Enable/disable this uploader
         api_token: str - FlySto API token (https://www.flysto.net/account/api)
-        check_duplicates: bool - Query FlySto first and skip flights already
-            uploaded (default True; needs api_token). If the query fails the
-            upload proceeds anyway.
+        check_duplicates: bool - Before uploading, ask FlySto for its most
+            recent log and only upload flights dated (UTC) after that day.
+            Assumes the card is loaded about once a day. Default True; needs
+            api_token. If the query fails the upload proceeds anyway.
         client_id, client_secret, redirect_uri, refresh_token:
             legacy OAuth2 settings, only used when api_token is empty
     """
@@ -45,10 +46,6 @@ class FlyStoUploader(FlightDataUploader):
     OAUTH_TOKEN_URL = "https://www.flysto.net/oauth/token"
     UPLOAD_URL = "https://www.flysto.net/public-api/log-upload"
     LOGS_URL = "https://www.flysto.net/public-api/logs"
-    # FlySto computes takeoff/landing times itself, so allow a little slack
-    # around the recorded window when matching.
-    DUPLICATE_TOLERANCE = timedelta(minutes=2)
-    MAX_LOG_PAGES = 10
     SERVICE_NAME = "FlySto"
 
     def __init__(self, config: dict):
@@ -65,7 +62,7 @@ class FlyStoUploader(FlightDataUploader):
         # Static API token (preferred). When set, OAuth is not used at all.
         self.api_token = (config.get('api_token') or '').strip()
         self.check_duplicates = bool(config.get('check_duplicates', True))
-        self._log_cache: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+        self._latest_cache: Optional[Tuple[Optional[date], Optional[Dict[str, Any]]]] = None
 
         # Legacy OAuth tokens - from config or the token file
         self.access_token = config.get('access_token', '')
@@ -241,98 +238,82 @@ class FlyStoUploader(FlightDataUploader):
             return False, error_msg
 
     # ------------------------------------------------------------------
-    # Duplicate detection (queries FlySto's public logs API)
+    # "Only upload what's newer than FlySto's latest log"
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _parse_iso(value: str) -> Optional[datetime]:
-        """Parse FlySto's ISO timestamps ("...Z") into aware UTC datetimes."""
+    def _log_date(log: Dict[str, Any]) -> Optional[date]:
+        """UTC date of a FlySto log, from its takeoff/landing times (else its 'date')."""
+        days = []
+        for event in list(log.get('takeoffs') or []) + list(log.get('approaches') or []):
+            try:
+                t = datetime.fromisoformat(str(event.get('time', '')).replace('Z', '+00:00'))
+            except ValueError:
+                continue
+            if t.tzinfo:
+                t = t.astimezone(timezone.utc)
+            days.append(t.date())
+        if days:
+            return max(days)
         try:
-            dt = datetime.fromisoformat(value.replace('Z', '+00:00'))
-        except (ValueError, AttributeError):
+            return datetime.strptime(str(log.get('date', '')), '%d %b %Y').date()
+        except ValueError:
             return None
-        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
-    @staticmethod
-    def _norm_ident(ident: Optional[str]) -> str:
-        """Normalise a tail number: first token (drops "(B23T)"), no dashes, upper."""
-        if not ident:
-            return ''
-        return ident.split()[0].replace('-', '').upper()
+    def latest_uploaded(self) -> Tuple[Optional[date], Optional[Dict[str, Any]]]:
+        """
+        Date (and log) of the most recent flight already on FlySto.
 
-    def _fetch_logs(self, start: datetime, end: datetime) -> Optional[List[Dict[str, Any]]]:
-        """Fetch FlySto logs between two dates (padded by a day). None on failure."""
-        from_date = (start - timedelta(days=1)).strftime('%Y-%m-%d')
-        to_date = (end + timedelta(days=1)).strftime('%Y-%m-%d')
-        key = (from_date, to_date)
-        if key in self._log_cache:
-            return self._log_cache[key]
+        Looks at the newest page of logs and takes the latest date among them,
+        so it doesn't matter whether FlySto orders by flight date or upload
+        time. Returns (None, None) if FlySto has no logs or the query fails.
+        Cached for the lifetime of the uploader.
+        """
+        if self._latest_cache is not None:
+            return self._latest_cache
 
-        logs: List[Dict[str, Any]] = []
-        url: Optional[str] = self.LOGS_URL
-        params: Optional[Dict[str, Any]] = {
-            'type': 'all', 'from-date': from_date, 'to-date': to_date, 'limit': 250,
-        }
+        result: Tuple[Optional[date], Optional[Dict[str, Any]]] = (None, None)
         try:
-            for _ in range(self.MAX_LOG_PAGES):
-                response = requests.get(
-                    url,
-                    headers={'Authorization': f'Bearer {self._bearer()}'},
-                    params=params,
-                    timeout=30,
-                )
-                if response.status_code != 200:
-                    logger.warning(f"FlySto log query failed: HTTP {response.status_code}")
-                    return None
-                data = response.json()
-                logs.extend(data.get('logs', []))
-                url, params = data.get('next'), None  # `next` is a complete URL
-                if not url:
-                    break
+            response = requests.get(
+                self.LOGS_URL,
+                headers={'Authorization': f'Bearer {self._bearer()}'},
+                params={'type': 'all'},
+                timeout=30,
+            )
+            if response.status_code != 200:
+                logger.warning(f"FlySto log query failed: HTTP {response.status_code}")
+                return result  # not cached: try again next time
+            best = None
+            for log in response.json().get('logs', []):
+                d = self._log_date(log)
+                if d and (best is None or d > best[0]):
+                    best = (d, log)
+            if best:
+                result = best
         except Exception as e:
             logger.warning(f"FlySto log query failed: {e}")
-            return None
+            return result
 
-        self._log_cache[key] = logs
-        return logs
+        self._latest_cache = result
+        return result
 
-    def find_duplicate(self, flight_data: FlightData) -> Optional[Dict[str, Any]]:
+    def already_uploaded(self, flight_data: FlightData) -> Optional[Dict[str, Any]]:
         """
-        Return the existing FlySto log that matches this flight, or None.
+        Return FlySto's latest log if this flight is not newer than it, else None.
 
-        A FlySto log matches when its aircraft agrees (if both sides know it)
-        and any of its takeoff or landing times falls inside the time window
-        recorded by the local log (plus a small tolerance). Logs with no
-        takeoff or landing (e.g. engine-start only) are not matched.
-
-        Returns None, meaning "upload", if the query fails or the local log
-        has no data points.
+        "Newer" means the local log starts on a later UTC day than FlySto's
+        most recent log. With no data points, no FlySto logs, or a failed
+        query, returns None (i.e. upload).
         """
-        points = flight_data.data_points
-        if not points:
+        if not flight_data.data_points:
             return None
-
-        def utc(dt: datetime) -> datetime:
-            return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
-
-        start, end = utc(points[0].timestamp), utc(points[-1].timestamp)
-        logs = self._fetch_logs(start, end)
-        if not logs:
+        latest_day, latest_log = self.latest_uploaded()
+        if latest_day is None:
             return None
-
-        lo, hi = start - self.DUPLICATE_TOLERANCE, end + self.DUPLICATE_TOLERANCE
-        ident = self._norm_ident(flight_data.metadata.aircraft_ident)
-
-        for log in logs:
-            remote_ident = self._norm_ident(log.get('aircraft'))
-            if ident and remote_ident and ident != remote_ident:
-                continue
-            events = list(log.get('takeoffs') or []) + list(log.get('approaches') or [])
-            for event in events:
-                t = self._parse_iso(event.get('time', ''))
-                if t and lo <= t <= hi:
-                    return log
-        return None
+        ts = flight_data.data_points[0].timestamp
+        if ts.tzinfo:
+            ts = ts.astimezone(timezone.utc)
+        return latest_log if ts.date() <= latest_day else None
 
     def _build_zip_payload(self, flight_data: FlightData) -> bytes:
         """Build the ZIP payload that would be sent to FlySto."""
@@ -417,15 +398,19 @@ class FlyStoUploader(FlightDataUploader):
                 message="Failed to obtain valid FlySto access token"
             )
 
-        # Skip flights FlySto already has (FlySto doesn't deduplicate itself)
+        # Only upload flights newer than FlySto's most recent log
         if self.api_token and self.check_duplicates:
-            existing = self.find_duplicate(flight_data)
+            existing = self.already_uploaded(flight_data)
             if existing:
-                logger.info(f"Skipping {Path(flight_data.file_path).name}: already on FlySto ({existing.get('url')})")
+                latest_day, _ = self.latest_uploaded()
+                logger.info(
+                    f"Skipping {Path(flight_data.file_path).name}: FlySto already has "
+                    f"flights through {latest_day} ({existing.get('url')})"
+                )
                 return UploadResult(
                     success=True,
                     service=self.SERVICE_NAME,
-                    message=f"Already on FlySto, skipped: {existing.get('url', existing.get('id', ''))}",
+                    message=f"Skipped: FlySto already has flights through {latest_day}",
                     upload_id=existing.get('id'),
                     url=existing.get('url'),
                     metadata={'duplicate': True},
