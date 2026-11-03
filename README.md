@@ -79,7 +79,7 @@ If enabled, avcardtool will parse G3X flight logs, calculate Hobbs and Tach time
 You are asked whether to enable each service. Only enabled services will receive uploads when your SD card is inserted.
 
 - **CloudAhoy** — API token (Bearer token from your CloudAhoy account)
-- **FlySto** — an API token, created at <https://www.flysto.net/account/api> (sent as a Bearer token). Legacy OAuth settings (client ID/secret, `flysto-auth`) still work if no token is set.
+- **FlySto** — an API token, created at <https://www.flysto.net/account/api> (sent as a Bearer token). Before each upload the FlySto logs API is queried and flights already on FlySto (same aircraft, takeoff/landing inside the log's time window) are skipped; set `check_duplicates: false` under the flysto uploader to turn this off. Legacy OAuth settings (client ID/secret, `flysto-auth`) still work if no token is set.
 - **Savvy Aviation** — No credentials required. Files are staged locally at `<data_dir>/savvy_staging/` for manual upload via their website.
 - **Carryd** — API key (format: `eal_...`, obtained from the Carryd dashboard under **Settings → API Keys**) and an optional comma-separated list of engine logbook UUIDs (found under **Logbook → Settings**). Omit logbook UUIDs to update total airframe time only.
 
