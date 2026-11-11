@@ -782,7 +782,20 @@ def auto_process(ctx, path: Path, service: tuple, skip_uploads: bool, force: boo
         is_most_recent = (idx == len(pending_uploads) - 1)
 
         if is_most_recent and override_meta:
-            if _log_date_key(lf) < override_meta['file_date_key']:
+            # Only valid if no other flight sits between this flight and the
+            # override file.  Files already recorded as flights/historical
+            # (e.g. from earlier insertions) mean the override file follows
+            # *those*, not this older flight.
+            _lo, _hi = _log_date_key(lf), override_meta['file_date_key']
+            _flight_between = False
+            for _f in log_files:
+                _k = _log_date_key(_f)
+                if _lo < _k < _hi:
+                    _rec = processed_db.get_record(hash_file(_f)) or {}
+                    if _rec.get('is_flight') or _rec.get('historical'):
+                        _flight_between = True
+                        break
+            if _lo < _hi and not _flight_between:
                 new_hobbs = override_meta['airframe_hours']
                 old_hobbs = (summary.get('hobbs') or {}).get('ending_hours')
                 if new_hobbs is not None and new_hobbs != old_hobbs:
