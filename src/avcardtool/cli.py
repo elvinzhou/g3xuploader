@@ -1219,7 +1219,6 @@ def navdata_download(ctx, aircraft: int, device: Optional[int], series: Optional
         # Avionics types of this aircraft's displays: TAW files for any other
         # family in a subscription (e.g. G600, X3) are skipped before download.
         device_type_map, primary_db_type = _build_device_type_map(api, [d for d, _, _, _ in plan])
-        wanted_db_types = set(device_type_map.values()) or None
         # ---------------------------------------------------------------
         # Step 2: for each entry unlock, fetch file list, and download
         # ---------------------------------------------------------------
@@ -1230,17 +1229,12 @@ def navdata_download(ctx, aircraft: int, device: Optional[int], series: Optional
             expiry = (target.invalid_at or "no expiry")[:10]
             click.echo(f"\n  {avdb.name}  device={dev.name}  series={s.series_id}  issue={target.name} (expires {expiry})")
 
-            # Fetch file list (doesn't need the unlock), and drop files for
-            # avionics that aren't in this aircraft before unlocking anything.
+            # Fetch the file list (doesn't need the unlock). Garmin lists this
+            # device's own files for its series, so all of them are used.
             issue_files = api.list_files(s.series_id, target.name)
             all_files = issue_files.main_files + issue_files.auxiliary_files
             if not all_files:
                 click.echo("    No files found for this issue.")
-                continue
-            all_files = _keep_files_for_avionics(
-                api, all_files, wanted_db_types, lambda m: click.echo(f"    {m}"))
-            if not all_files:
-                click.echo("    Nothing here for this aircraft's avionics — skipped.")
                 continue
 
             unlock_codes = []
@@ -1261,18 +1255,22 @@ def navdata_download(ctx, aircraft: int, device: Optional[int], series: Optional
                 click.echo(f"\r    {db_file.file_name}: done ({db_file.file_size:,} bytes)  ")
                 downloaded.append(dest)
 
-                # Peek at TAW header to get database_type (avionics device code).
-                # Used during install to filter out TAW files for other avionics units
-                # that share this subscription (e.g. jg600a, bdg600, shzn, tgtn).
+                # The avionics type recorded for a TAW is the device's own (what
+                # install matches against the card and signs feat_unlk.dat with).
+                # The header's type can differ: a GTN's navigation data is served
+                # as 'jg600a-*.taw', whose header names the G600 family.
                 taw_db_type = None
                 if dest.suffix.lower() == ".taw":
+                    taw_db_type = device_type_map.get(dev.name)
                     try:
                         from avcardtool.navdata.garmin.taw_parser import TAWParser
                         taw_info = TAWParser().parse(dest)
-                        taw_db_type = taw_info.header.database_type
+                        header_type = taw_info.header.database_type
+                        if taw_db_type is None:
+                            taw_db_type = header_type
                         click.echo(
                             f"    avionics='{taw_info.header.avionics}' "
-                            f"db_type=0x{taw_db_type:04X}"
+                            f"header db_type=0x{header_type:04X}"
                         )
                     except Exception:
                         pass
@@ -1696,42 +1694,6 @@ def _build_device_type_map(api, devices: list) -> tuple:
         except Exception as e:
             click.echo(f"Warning: /device-models/ lookup failed ({e}) — falling back to frequency heuristic")
     return device_type_map, primary_db_type
-
-
-def _keep_files_for_avionics(api, files: list, wanted: Optional[set], echo,
-                             fallback_out: Optional[set] = None) -> list:
-    """
-    Choose which of a series' files belong to the card's avionics.
-
-    A series' file list can mix avionics families (e.g. G600 'bdg600-*'
-    obstacle files next to a GTN's), so .taw files are filtered by the avionics
-    type in their header, read from the first few KiB (no full download). Files
-    whose type can't be read, and non-TAW files, are kept. wanted=None keeps all.
-
-    When the list holds a single .taw there is nothing to choose between:
-    Garmin put exactly one file in this device's series (a GTN 6XX Xi's
-    navigation data is 'jg600a-us-*.taw', header type G600, and flyGarmin's own
-    update page offers exactly that file for the GTN), so it is kept even if its
-    header names another family. That only applies when *fallback_out* is given;
-    the file's name is then added to it so the caller can sign it with the
-    card's own type instead of the header's.
-    """
-    if not wanted:
-        return list(files)
-    single_taw = sum(1 for f in files if f.file_name.lower().endswith(".taw")) == 1
-    keep = []
-    for f in files:
-        db_type = api.peek_taw_database_type(f)
-        if db_type is not None and db_type not in wanted:
-            if single_taw and fallback_out is not None:
-                echo(f"{f.file_name}: its header says avionics type 0x{db_type:04X}, but it "
-                     f"is the only file Garmin lists for this device — using it")
-                fallback_out.add(f.file_name)
-            else:
-                echo(f"Skipping {f.file_name}: for other avionics (db_type 0x{db_type:04X})")
-                continue
-        keep.append(f)
-    return keep
 
 
 def _system_id_for_card(manifest: dict, entries: list) -> int:
@@ -2654,11 +2616,8 @@ def navdata_auto_update(ctx, device: Optional[Path]):
                 _release_dl_slot(cache_dir, cache_key, [], {}, [], avdb.type_id, s.series_id, success=False)
                 continue
 
-            fallback_names: set = set()
-            card_files = _keep_files_for_avionics(
-                api, issue_files.main_files + issue_files.auxiliary_files,
-                {target_db_type}, lambda m: _log.info(f"  {m}"),
-                fallback_out=fallback_names)
+            # Garmin's list for this device's series is the device's own files.
+            card_files = issue_files.main_files + issue_files.auxiliary_files
             if not card_files:
                 _log.info(f"  {cache_key}: nothing for this card's avionics — skipped")
                 # Not cached as done: Garmin may list the file later, and the
@@ -2705,14 +2664,18 @@ def navdata_auto_update(ctx, device: Optional[Path]):
                     dest = api.download_file(db_file, issue_cache_dir)
                     _log.info(f"  Downloaded {dest.name} ({dest.stat().st_size:,} bytes)")
 
-                    taw_db_type = None
-                    if dest.suffix.lower() == ".taw":
+                    # Record the card's own avionics type (not the header's: a GTN's
+                    # nav data is 'jg600a-*.taw', header type G600): install matches
+                    # on it and signs feat_unlk.dat with it.
+                    taw_db_type = target_db_type if dest.suffix.lower() == ".taw" else None
+                    if taw_db_type is not None:
                         try:
-                            taw_db_type = TAWParser().parse(dest).header.database_type
+                            header_type = TAWParser().parse(dest).header.database_type
+                            if header_type != target_db_type:
+                                _log.info(f"  {dest.name}: header type 0x{header_type:04X}, "
+                                          f"installing as 0x{target_db_type:04X}")
                         except Exception:
                             pass
-                    if db_file.file_name in fallback_names:
-                        taw_db_type = target_db_type  # sign with the card's own type
 
                     cache_path = str(dest.relative_to(cache_dir))
                     downloaded.append(dest)
@@ -3387,10 +3350,6 @@ def navdata_update(ctx, device: Optional[Path], aircraft: int, yes: bool):
                     _release_dl_slot(cache_dir, dl_cache_key, [], {}, [], avdb.type_id, s.series_id, success=False)
                     continue
 
-            fallback_names: set = set()
-            dl_files = _keep_files_for_avionics(
-                api, dl_files, {target_db_type}, lambda m: click.echo(f"    {m}"),
-                fallback_out=fallback_names)
             if not dl_files:
                 click.echo("    Nothing here for this card's avionics — skipped.")
                 _release_dl_slot(cache_dir, dl_cache_key, [], {}, dl_removable,
@@ -3415,14 +3374,8 @@ def navdata_update(ctx, device: Optional[Path], aircraft: int, yes: bool):
                     dest = api.download_file(db_file, issue_cache_dir, progress_callback=_progress)
                     click.echo(f"\r    Downloaded  {db_file.file_name}  ({dest.stat().st_size:,} bytes)  ")
 
-                    taw_db_type = None
-                    if dest.suffix.lower() == ".taw":
-                        try:
-                            taw_db_type = TAWParser().parse(dest).header.database_type
-                        except Exception:
-                            pass
-                    if db_file.file_name in fallback_names:
-                        taw_db_type = target_db_type  # sign with the card's own type
+                    # The card's own avionics type, not the header's (see auto-update).
+                    taw_db_type = target_db_type if dest.suffix.lower() == ".taw" else None
 
                     cache_path = str(dest.relative_to(cache_dir))
                     downloaded.append(dest)

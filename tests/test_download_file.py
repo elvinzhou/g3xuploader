@@ -160,7 +160,7 @@ def test_unlock_does_not_send_card_serial():
 # --- Skipping other avionics' TAWs before download -----------------------------
 
 from test_taw_parser import build_taw  # noqa: E402
-from avcardtool.cli import _dl_cache_key, _keep_files_for_avionics  # noqa: E402
+from avcardtool.cli import _dl_cache_key  # noqa: E402
 from avcardtool.navdata.garmin.taw_parser import TAWParser, TAWParseError  # noqa: E402
 
 G3X, G600, X3 = 0x06BF, 0x01F2, 0x07EB
@@ -176,60 +176,18 @@ def test_header_rejects_non_taw():
         TAWParser().parse_header_bytes(b"not a taw file at all")
 
 
-def _peek_api(bodies):
-    """bodies: url -> bytes (the full file; the fake server ignores Range)."""
-    api = FlyGarminAPI(mock.Mock())
-    api._session = mock.Mock()
-
-    def get(url, headers=None, stream=False, timeout=None):
-        assert headers["Range"] == "bytes=0-4095"
-        return FakeResponse(bodies[url])
-    api._session.get.side_effect = get
-    return api
 
 
 def _taw_file(name):
     return DatabaseFile(url=f"https://avdb.garmin.com/{name}", file_size=0, destination=None)
 
 
-def test_peek_reads_type_without_full_download():
-    big = build_taw(db_type=X3, regions=[(0x27, b"y" * 1_000_000)])
-    api = _peek_api({"https://avdb.garmin.com/mdhzn-ww-26M1.taw": big})
-    assert api.peek_taw_database_type(_taw_file("mdhzn-ww-26M1.taw")) == X3
 
 
-def test_peek_skips_non_taw_and_tolerates_errors():
-    api = FlyGarminAPI(mock.Mock())
-    api._session = mock.Mock()
-    assert api.peek_taw_database_type(_taw_file("SECT_N36W078.jnx")) is None
-    api._session.get.assert_not_called()
-
-    api._session.get.side_effect = ConnectionError("boom")
-    assert api.peek_taw_database_type(_taw_file("x.taw")) is None
 
 
-def test_keep_files_for_avionics():
-    files = {
-        "nav-g3x.taw": build_taw(db_type=G3X),
-        "bdg600-ue-26B6.taw": build_taw(db_type=G600),
-        "mdhzn-ww-26M1.taw": build_taw(db_type=X3),
-        "garbled.taw": b"????",
-    }
-    api = _peek_api({f"https://avdb.garmin.com/{n}": b for n, b in files.items()})
-    listed = [_taw_file(n) for n in files] + [_taw_file("SECT_N36W078.jnx")]
-    skipped = []
-
-    keep = _keep_files_for_avionics(api, listed, {G3X}, skipped.append)
-
-    assert [f.file_name for f in keep] == ["nav-g3x.taw", "garbled.taw", "SECT_N36W078.jnx"]
-    assert len(skipped) == 2 and "0x01F2" in skipped[0] and "0x07EB" in skipped[1]
 
 
-def test_keep_files_without_known_avionics_keeps_everything():
-    api = mock.Mock()
-    files = [_taw_file("a.taw"), _taw_file("b.jnx")]
-    assert _keep_files_for_avionics(api, files, None, print) == files
-    api.peek_taw_database_type.assert_not_called()
 
 
 def test_cache_key_is_per_avionics():
@@ -291,56 +249,10 @@ def test_peek_feature_crcs_non_taw_and_errors():
     assert api.peek_taw_feature_crcs(_taw_file("x.taw")) == {}
 
 
-# --- A device served a TAW whose header names another avionics family ----------
-
-GTN = 0x0402
 
 
-def test_the_only_taw_is_used_even_if_its_header_names_another_family():
-    """GTN 6XX Xi nav data: header says G600, flyGarmin offers it for the GTN."""
-    api = _peek_api({"https://avdb.garmin.com/jg600a-us-2611.taw": build_taw(db_type=G600)})
-    notes, fallback = [], set()
-
-    keep = _keep_files_for_avionics(
-        api, [_taw_file("jg600a-us-2611.taw")], {GTN}, notes.append, fallback_out=fallback)
-
-    assert [f.file_name for f in keep] == ["jg600a-us-2611.taw"]
-    assert fallback == {"jg600a-us-2611.taw"}
-    assert any("using it" in n for n in notes)
 
 
-def test_the_only_taw_matching_the_card_is_not_a_fallback():
-    api = _peek_api({"https://avdb.garmin.com/tgtn-amrn-20T1.taw": build_taw(db_type=GTN)})
-    fallback = set()
-    keep = _keep_files_for_avionics(
-        api, [_taw_file("tgtn-amrn-20T1.taw")], {GTN}, lambda m: None, fallback_out=fallback)
-    assert [f.file_name for f in keep] == ["tgtn-amrn-20T1.taw"] and fallback == set()
 
 
-def test_several_taws_are_filtered_by_header_type():
-    """A series that mixes families: only the card's own file is kept."""
-    api = _peek_api({
-        "https://avdb.garmin.com/bgtn-us-26B6.taw": build_taw(db_type=GTN),
-        "https://avdb.garmin.com/bdg600-us-26B6.taw": build_taw(db_type=G600),
-    })
-    fallback = set()
-    keep = _keep_files_for_avionics(
-        api, [_taw_file("bgtn-us-26B6.taw"), _taw_file("bdg600-us-26B6.taw")],
-        {GTN}, lambda m: None, fallback_out=fallback)
-    assert [f.file_name for f in keep] == ["bgtn-us-26B6.taw"] and fallback == set()
 
-
-def test_several_taws_none_matching_installs_nothing():
-    api = _peek_api({
-        "https://avdb.garmin.com/a.taw": build_taw(db_type=G600),
-        "https://avdb.garmin.com/b.taw": build_taw(db_type=X3),
-    })
-    keep = _keep_files_for_avionics(
-        api, [_taw_file("a.taw"), _taw_file("b.taw")], {GTN}, lambda m: None, fallback_out=set())
-    assert keep == []
-
-
-def test_single_taw_trust_is_off_unless_the_caller_handles_the_signing():
-    api = _peek_api({"https://avdb.garmin.com/jg600a-us-2611.taw": build_taw(db_type=G600)})
-    assert _keep_files_for_avionics(
-        api, [_taw_file("jg600a-us-2611.taw")], {GTN}, lambda m: None) == []
