@@ -21,7 +21,8 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ReadWritePaths=AVCARDTOOL_DATA_DIR AVCARDTOOL_CONFIG_DIR /media
 
-# Downloads can be large (~600 MB) and the card write is slow
-TimeoutStartSec=1800
+# Downloads are large (several GB with charts, ~1 MB/s on a slow link) and
+# the card write is slow; a killed run resumes from the cache.
+TimeoutStartSec=6h
 CPUQuota=50%
 MemoryMax=512M
