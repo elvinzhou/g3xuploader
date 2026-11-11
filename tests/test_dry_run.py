@@ -369,3 +369,65 @@ def test_config_built_without_init_can_be_saved(tmp_path):
     cfg.override_system(dry_run=True)
     assert cfg.system.dry_run is True
     assert cfg.to_dict()["system"]["dry_run"] is False
+
+
+# ---------------------------------------------------------------------------
+# Non-flight ending-hours override
+# ---------------------------------------------------------------------------
+
+def _make_override_card(tmp_path, with_processed_flight_between):
+    """Old pending flight, optional processed flight, then a newer non-flight."""
+    from avcardtool.core.processed_files import ProcessedFilesDatabase as DB
+    from avcardtool.core import hash_file
+
+    data_log = tmp_path / "card" / "data_log"
+    data_log.mkdir(parents=True)
+    lines = SAMPLE_FLIGHT.read_text().splitlines(keepends=True)
+
+    def write(name, airframe, engine, rows=None):
+        header = lines[0].replace('airframe_hours="94.6"', f'airframe_hours="{airframe}"') \
+                         .replace('engine_hours="53.1"', f'engine_hours="{engine}"')
+        body = lines[1:] if rows is None else lines[1:rows]
+        path = data_log / name
+        path.write_text(header + "".join(body))
+        return path
+
+    write("log_20251107_100757_KOAK.csv", "94.6", "53.1")
+    middle = write("log_20260327_152821_KOAK.csv", "120.0", "80.0")
+    # Ground power cycle: header + a few stationary rows, authoritative hours
+    write("log_20260917_171437_KOAK.csv", "161.6", "167.5", rows=10)
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    db = DB(data_dir / "processed_files.json")
+    if with_processed_flight_between:
+        db.mark_processed(hash_file(middle), middle, "N662EZ", True)
+    else:
+        middle.unlink()
+        db.mark_processed("unrelated", middle, "N1", False)  # DB exists -> not a first run
+    return tmp_path / "card", _write_config_no_uploaders(tmp_path, data_dir)
+
+
+def _write_config_no_uploaders(tmp_path, data_dir):
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({"system": {
+        "data_dir": str(data_dir),
+        "log_file": str(tmp_path / "avcardtool.log"),
+    }}))
+    return cfg_path
+
+
+class TestNonFlightOverride:
+    def test_override_applied_to_immediately_preceding_flight(self, tmp_path):
+        card, cfg_path = _make_override_card(tmp_path, with_processed_flight_between=False)
+        result = CliRunner().invoke(cli, ["--config", str(cfg_path), "--dry-run", "auto-process", str(card)])
+        assert result.exit_code == 0, result.output
+        assert "log_20260917_171437_KOAK.csv" in result.output
+        assert "Hobbs ending adjusted" in result.output
+
+    def test_override_not_applied_across_processed_flight(self, tmp_path):
+        card, cfg_path = _make_override_card(tmp_path, with_processed_flight_between=True)
+        result = CliRunner().invoke(cli, ["--config", str(cfg_path), "--dry-run", "auto-process", str(card)])
+        assert result.exit_code == 0, result.output
+        assert "Flight detected" in result.output
+        assert "ending adjusted" not in result.output
