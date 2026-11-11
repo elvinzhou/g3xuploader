@@ -82,3 +82,19 @@ def test_never_prunes_issue_being_downloaded(tmp_path):
 
 def test_missing_cache_dir_is_a_noop(tmp_path):
     assert cli_mod._prune_navdata_cache(tmp_path / "nope") == 0
+
+
+# ---------------------------------------------------------------------------
+# A "complete" cache entry with no files must not be served as a cache hit
+# ---------------------------------------------------------------------------
+
+def test_empty_complete_entry_is_not_a_cache_hit(tmp_path):
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    _state(cache, {
+        "2230/2611@0402": {"status": "complete", "files": []},          # old negative result
+        "2054/2611@06BF": {"status": "complete", "files": [{"cache_path": "a"}]},
+    })
+
+    assert cli_mod._acquire_dl_slot(cache, "2230/2611@0402") == "mine"   # re-check it
+    assert cli_mod._acquire_dl_slot(cache, "2054/2611@06BF") == "cached"

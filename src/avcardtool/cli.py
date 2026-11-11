@@ -1483,7 +1483,10 @@ def _acquire_dl_slot(cache_dir: Path, key: str) -> str:
         state = _read_dl_state(cache_dir)
         entry = state.get(key, {})
 
-        if entry.get("status") == "complete":
+        # A "complete" entry with no files is a leftover negative result ("nothing
+        # for this card's avionics") from older versions; treat it as a miss so
+        # the file list is checked again instead of silently installing nothing.
+        if entry.get("status") == "complete" and entry.get("files"):
             return "cached"
 
         if entry.get("status") == "downloading":
@@ -2548,6 +2551,7 @@ def navdata_auto_update(ctx, device: Optional[Path]):
             _log.info(f"  feat_unlk.dat CRCs: { {k: hex(v) for k, v in feat_unlk_crcs.items()} }")
 
         manifest_entries = []
+        unavailable: list = []  # current issues Garmin lists no file for on this card
         # (avdb name, issue name) → cycle-transition info for the notification
         plan_info = {
             (avdb.name, issue.name): {
@@ -2633,9 +2637,12 @@ def navdata_auto_update(ctx, device: Optional[Path]):
                 {target_db_type}, lambda m: _log.info(f"  {m}"))
             if not card_files:
                 _log.info(f"  {cache_key}: nothing for this card's avionics — skipped")
-                # Nothing to fetch for this card; record it so later runs don't retry
+                # Not cached as done: Garmin may list the file later, and the
+                # next run should notice. (The check is one small API call.)
                 _release_dl_slot(cache_dir, cache_key, [], {}, issue_files.removable_paths,
-                                 avdb.type_id, s.series_id, success=True)
+                                 avdb.type_id, s.series_id, success=False)
+                if not is_upcoming:
+                    unavailable.append(f"{avdb.name} {issue.name}")
                 continue
 
             # Cheap pre-check, before unlocking or downloading anything: if every
@@ -2725,6 +2732,12 @@ def navdata_auto_update(ctx, device: Optional[Path]):
                 series_id=s.series_id,
                 success=bool(downloaded),
             )
+
+        for what in unavailable:
+            msg = (f"{what} is available but Garmin's file list has no file for "
+                   f"{target_dev.name} (card {card_serial}) — not installed")
+            _log.error(f"  {msg}")
+            issues.append(("ERROR", msg))
 
         if not manifest_entries:
             _log.info(f"  Nothing to install for card at {mount}")
