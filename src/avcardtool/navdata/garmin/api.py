@@ -378,6 +378,44 @@ class FlyGarminAPI:
         resp.raise_for_status()
         return resp.json()
 
+    def download_unlock_files(self, unlock_resp: dict, output_dir: Path) -> List[tuple]:
+        """
+        Download the files an unlock response lists (``files[]``).
+
+        Garmin's tool installs a GTN's navigation data with per-unit signed
+        license files (``*.sff``) plus ``ldr_sys/grm_feat_key.zip``; the unlock
+        response carries them as ``{url, destination, sendAuthorization}``.
+        Only Garmin can sign them, so they must come from here.
+
+        The bearer token is sent only to https://*.garmin.com URLs, whatever
+        the response says. Each file is saved under its ``destination`` inside
+        *output_dir* (``ldr_sys/x`` -> ``output_dir/ldr_sys/x``).
+
+        Returns [(local_path, destination)], destination as the card-relative path.
+        """
+        out: List[tuple] = []
+        for f in unlock_resp.get("files") or []:
+            url = f.get("url") or ""
+            dest_rel = (f.get("destination") or "").replace("\\", "/").lstrip("/")
+            if not url or not dest_rel or ".." in dest_rel.split("/"):
+                raise GarminAPIError(f"Unusable file entry in unlock response: {dest_rel!r}")
+            headers = {}
+            if f.get("sendAuthorization"):
+                parsed = urlparse(url)
+                host = (parsed.hostname or "").lower()
+                if parsed.scheme != "https" or not (host == "garmin.com" or host.endswith(".garmin.com")):
+                    raise GarminAPIError(
+                        f"Refusing to send credentials to a non-Garmin host for {dest_rel}")
+                headers = self._auth_headers()
+            resp = self._session.get(url, headers=headers, timeout=60)
+            resp.raise_for_status()
+            local = output_dir / dest_rel
+            local.parent.mkdir(parents=True, exist_ok=True)
+            local.write_bytes(resp.content)
+            logger.info(f"Downloaded unlock file {dest_rel} ({len(resp.content):,} bytes)")
+            out.append((local, dest_rel))
+        return out
+
     def report_installed_issues(
         self,
         installations: List[dict],

@@ -1237,20 +1237,24 @@ def navdata_download(ctx, aircraft: int, device: Optional[int], series: Optional
                 click.echo("    No files found for this issue.")
                 continue
             mismatched = _taw_header_mismatches(api, all_files, device_type_map.get(dev.name))
-            if mismatched:
-                click.echo("    " + _unsupported_install_message(
+            series_dir = output_dir / avdb.name.replace(" ", "_") / target.name
+
+            unlock_codes: list = []
+            license_entries: list = []
+            unlock_files: dict = {}
+            try:
+                license_entries, unlock_files, unlock_codes = _unlock_for_install(
+                    api, s.series_id, target.name, dev.device_id,
+                    series_dir / "licenses", output_dir)
+                click.echo("    Unlocked."
+                           + (f" Fetched {len(license_entries)} license file(s)." if license_entries else ""))
+            except Exception as e:
+                click.echo(f"    Warning: unlock failed ({e}) — attempting download anyway.")
+            if mismatched and not license_entries:
+                click.echo("    " + _missing_licenses_message(
                     f"{avdb.name} {target.name}", dev.name, mismatched), err=True)
                 continue
 
-            unlock_codes = []
-            try:
-                unlock_resp = api.unlock(s.series_id, target.name, dev.device_id)
-                unlock_codes = unlock_resp.get("unlockCodes", [])
-                click.echo("    Unlocked.")
-            except Exception as e:
-                click.echo(f"    Warning: unlock failed ({e}) — attempting download anyway.")
-
-            series_dir = output_dir / avdb.name.replace(" ", "_") / target.name
             for db_file in all_files:
                 def _progress(done: int, total: int, name: str = db_file.file_name) -> None:
                     pct = int(done / total * 100) if total else 0
@@ -1291,7 +1295,14 @@ def navdata_download(ctx, aircraft: int, device: Optional[int], series: Optional
                     "removable_paths": issue_files.removable_paths,
                     "unlock_codes": unlock_codes,
                     "taw_database_type": taw_db_type,  # avionics type code; None for .jnx/.hif
+                    **({"region_paths": rp} if (rp := (
+                        _licensed_region_paths(dest, unlock_files)
+                        if taw_db_type is not None else {})) else {}),
                 })
+
+            for lic in license_entries:
+                manifest_entries.append(_license_manifest_entry(
+                    lic, avdb.name, avdb.type_id, s.series_id, target.name, dev.device_id))
 
         # Write manifest so 'navdata install' knows destinations and cleanup paths
         if manifest_entries:
@@ -1707,8 +1718,8 @@ def _taw_header_mismatches(api, files: list, target_db_type: Optional[int]) -> l
 
     flyGarmin serves a GTN 6XX Xi's navigation data as 'jg600a-*.taw' (header
     type G600). Garmin's own tool installs it with signed '.sff' license files
-    (plus ldr_sys/grm_feat_key.zip) whose signature only Garmin can produce, so
-    this tool cannot install such a file correctly yet and must not write it.
+    (plus ldr_sys/grm_feat_key.zip) that come from the unlock response. A file
+    like this is only installable if the unlock does return licenses.
     """
     if target_db_type is None:
         return []
@@ -1720,11 +1731,205 @@ def _taw_header_mismatches(api, files: list, target_db_type: Optional[int]) -> l
     return out
 
 
-def _unsupported_install_message(what: str, device: str, mismatches: list) -> str:
+def _unlock_filenames(unlock_resp: dict) -> dict:
+    """
+    {avdbTypeVersion: card-relative path} from an unlock response's 'unlockData'.
+
+    Each entry names one database file Garmin's tool writes for the issue
+    ('featureUnlockFilename', e.g. ldr_sys/nav_db2.bin) and the feat_unlk.dat
+    slot that signs it ('featureUnlockSlot').
+    """
+    out: dict = {}
+    for u in unlock_resp.get("unlockData") or []:
+        version, name = u.get("avdbTypeVersion"), u.get("featureUnlockFilename")
+        if not isinstance(version, int) or not isinstance(name, str):
+            continue
+        name = name.replace("\\", "/").lstrip("/")
+        if name and ".." not in name.split("/"):
+            out[version] = name
+    return out
+
+
+def _unlock_slots(unlock_resp: dict) -> dict:
+    """{card-relative path: feat_unlk.dat slot} from an unlock response's 'unlockData'."""
+    out: dict = {}
+    for u in unlock_resp.get("unlockData") or []:
+        name, slot = u.get("featureUnlockFilename"), u.get("featureUnlockSlot")
+        if isinstance(name, str) and isinstance(slot, int) and not isinstance(slot, bool):
+            out[name.replace("\\", "/").lstrip("/")] = slot
+    return out
+
+
+def _check_unlock_slots(entries: list, sd_card: Path) -> list:
+    """
+    Warnings for database files Garmin's unlock says are signed in a feat_unlk.dat
+    slot that this tool doesn't (or doesn't the same way) write.
+
+    The unlock response names each database file and its slot. We only know the
+    slot layout for avionics seen so far (feat_unlk.Feature); for a file outside
+    it we install the file and its licenses but can't write its slot, and the
+    display may reject it. Returns human-readable warnings.
+    """
+    from avcardtool.navdata.garmin.feat_unlk import FILENAME_TO_FEATURE, SLOT_SIZE
+    slots: dict = {}
+    for e in entries:
+        slots.update(e.get("unlock_slots") or {})
+    warnings = []
+    for path, slot in sorted(slots.items()):
+        if not (sd_card / path).exists():
+            continue
+        feature = FILENAME_TO_FEATURE.get(path)
+        if feature is None:
+            warnings.append(
+                f"{path}: Garmin signs it in feat_unlk.dat slot {slot}, but this tool has no "
+                f"slot layout for it, so it was installed without one (the display may reject it)")
+        elif feature.offset != slot * SLOT_SIZE:
+            warnings.append(
+                f"{path}: written to feat_unlk.dat offset {feature.offset} but Garmin says "
+                f"slot {slot} (offset {slot * SLOT_SIZE}); check the slot layout")
+    return warnings
+
+
+def _licensed_region_paths(taw_path: Path, unlock_files: dict) -> dict:
+    """
+    {TAW region id (str): path} for TAW regions whose default destination isn't
+    one of the files the unlock response names.
+
+    A GTN's nav TAW has region 0x01 (-> ldr_sys/avtn_db.bin, as named) and region
+    0x02, which defaults to the G3X basemap.bin but is the unlock's 'nav_db2.bin'.
+    Regions whose default path the unlock already names (e.g. the GTN terrain's
+    trn.dat) need no override. Names left over are paired with the left-over
+    regions in order (by avdbTypeVersion and region id).
+    """
+    if not unlock_files:
+        return {}
+    try:
+        from avcardtool.navdata.garmin.taw_parser import (
+            TAWParser, TAW_REGION_PATHS, SKIP_REGIONS,
+        )
+        regions = [r for r in TAWParser().parse(taw_path).regions
+                   if r.region_type in TAW_REGION_PATHS and r.region_type not in SKIP_REGIONS]
+    except Exception:
+        return {}
+    names = set(unlock_files.values())
+    produced = {r.output_path for r in regions}
+    free_names = [n for _, n in sorted(unlock_files.items()) if n not in produced]
+    free_regions = sorted(r.region_type for r in regions if r.output_path not in names)
+    return {str(rt): n for rt, n in zip(free_regions, free_names)}
+
+
+def _unlock_for_install(api, series_id: int, issue_name: str, device_id: int,
+                        license_dir: Path, base_dir: Path) -> tuple:
+    """
+    Unlock an issue for a device and fetch what the unlock response ships with it.
+
+    Some databases (e.g. a GTN's navigation data) come with per-unit signed
+    license files ('*.sff', ldr_sys/grm_feat_key.zip) that only Garmin can make;
+    others have none. The response says which, so no device is special-cased.
+
+    Returns (license_entries, unlock_files, unlock_codes):
+      license_entries: [{"cache_path" (relative to base_dir), "destination", "is_license"}]
+      unlock_files:    {avdbTypeVersion: path} from unlockData; empty when the
+                       response has no license files
+      unlock_codes:    the response's unlockCodes
+    Licenses are signed per unit, so they are never shared through the download cache.
+    Raises if the unlock or a license download fails.
+    """
+    unlock_resp = api.unlock(series_id, issue_name, device_id)
+    fetched = api.download_unlock_files(unlock_resp, license_dir)
+    slots = _unlock_slots(unlock_resp)
+    entries = [{"cache_path": path.relative_to(base_dir).as_posix(),
+                "destination": dest, "is_license": True,
+                **({"unlock_slots": slots} if slots else {})} for path, dest in fetched]
+    unlock_files = _unlock_filenames(unlock_resp) if entries else {}
+    return entries, unlock_files, unlock_resp.get("unlockCodes", [])
+
+
+def _manifest_entries_from_cache(api, cache_dir: Path, card_dir: Path, state: dict,
+                                 avdb, series, issue, device_id: int,
+                                 target_db_type: Optional[int], default_removable: list):
+    """
+    Manifest entries for a cached download of one issue, for one card.
+
+    Links the cached files into the card's dir and unlocks again for this device:
+    licenses are per unit, so they are never cached, and a cache written before
+    an avionics family needed them must still pick them up.
+    Returns (entries, error): error is a message when the issue can't be installed.
+    """
+    from avcardtool.navdata.garmin.taw_parser import TAWParser
+    cached_files = state.get("files", [])
+    license_entries: list = []
+    unlock_files: dict = {}
+    unlock_error = None
+    try:
+        license_entries, unlock_files, _codes = _unlock_for_install(
+            api, series.series_id, issue.name, device_id,
+            card_dir / str(series.series_id) / issue.name / "licenses", card_dir)
+    except Exception as e:
+        unlock_error = e
+    if not license_entries and target_db_type is not None:
+        for fe in cached_files:
+            if fe.get("taw_database_type") is None:
+                continue
+            try:
+                header = TAWParser().parse(cache_dir / fe["cache_path"]).header.database_type
+            except Exception:
+                continue
+            if header != target_db_type:
+                return [], (f"{avdb.name} {issue.name} needs license files (file is for "
+                            f"another avionics family) but the unlock gave none"
+                            + (f" ({unlock_error})" if unlock_error else ""))
+    entries = []
+    avdb_type_id = state.get("avdb_type_id", avdb.type_id)
+    series_id = state.get("series_id", series.series_id)
+    for fe in cached_files:
+        src = cache_dir / fe["cache_path"]
+        _link_or_copy(src, card_dir / fe["cache_path"])
+        rp = (_licensed_region_paths(src, unlock_files)
+              if fe.get("taw_database_type") is not None else {})
+        entries.append({
+            "local_path": fe["cache_path"],
+            "destination": fe["destination"],
+            "avdb_type": avdb.name,
+            "avdb_type_id": avdb_type_id,
+            "series_id": series_id,
+            "issue_name": issue.name,
+            "device_id": device_id,
+            "removable_paths": state.get("removable_paths", default_removable),
+            "unlock_codes": [],
+            "taw_database_type": fe.get("taw_database_type"),
+            **({"region_paths": rp} if rp else {}),
+        })
+    for lic in license_entries:
+        entries.append(_license_manifest_entry(
+            lic, avdb.name, avdb_type_id, series_id, issue.name, device_id))
+    return entries, None
+
+
+def _missing_licenses_message(what: str, device: str, mismatches: list) -> str:
     names = ", ".join(f"{f.file_name} (header type 0x{t:04X})" for f, t in mismatches)
-    return (f"{what} for {device} not installed: Garmin's file {names} is installed with "
-            f"signed .sff licenses that this tool can't create yet. Update this card with "
-            f"Garmin's GADM.")
+    return (f"{what} for {device} not installed: Garmin's file {names} is for another "
+            f"avionics family and needs license files, but the unlock response had none. "
+            f"Update this card with Garmin's GADM.")
+
+
+def _license_manifest_entry(lic: dict, avdb_name: str, avdb_type_id: int, series_id: int,
+                            issue_name: str, device_id: int) -> dict:
+    """Manifest entry for a license file from _unlock_for_install()."""
+    return {
+        "local_path": lic["cache_path"],
+        "destination": lic["destination"],
+        "is_license": True,
+        "avdb_type": avdb_name,
+        "avdb_type_id": avdb_type_id,
+        "series_id": series_id,
+        "issue_name": issue_name,
+        "device_id": device_id,
+        "removable_paths": [],
+        "unlock_codes": [],
+        "taw_database_type": None,
+        **({"unlock_slots": lic["unlock_slots"]} if lic.get("unlock_slots") else {}),
+    }
 
 
 def _system_id_for_card(manifest: dict, entries: list) -> int:
@@ -2045,6 +2250,30 @@ def navdata_install(ctx, sd_card: Optional[Path], from_dir: Optional[Path], yes:
 
         suffix = local_path.suffix.lower()
 
+        if entry.get("is_license"):
+            # Per-unit signed license (GTN '*.sff') or ldr_sys/grm_feat_key.zip from
+            # the unlock response: copied as-is to its destination. GADM leaves these
+            # as plain (not hidden / read-only) files.
+            rel_dest = (destination or "").replace("\\", "/").lstrip("/")
+            dest_path = sd_card / rel_dest
+            try:
+                dest_path.resolve().relative_to(sd_card.resolve())
+                safe = bool(rel_dest)
+            except ValueError:
+                safe = False
+            if not safe:
+                click.echo(f"  Skipping license with unsafe destination: {destination!r}", err=True)
+                errors.append(f"Unsafe license destination: {destination!r}")
+                continue
+            click.echo(f"  Copying  {local_path.name}  -> {rel_dest}")
+            dest_path.parent.mkdir(parents=True, exist_ok=True)
+            from avcardtool.navdata.garmin.taw_parser import _clear_readonly
+            if dest_path.exists():
+                _clear_readonly(dest_path)
+            shutil.copyfile(local_path, dest_path)
+            installed_files.append(dest_path)
+            continue
+
         if suffix == ".taw":
             # Extract TAW archive — files go to paths determined by region headers.
             # Parse the header first to get security_id (database_type), which is
@@ -2057,8 +2286,10 @@ def navdata_install(ctx, sd_card: Optional[Path], from_dir: Optional[Path], yes:
                 # whose header names another family (e.g. the GTN Xi's nav data), which
                 # must be signed with the card's own type.
                 security_id = entry.get("taw_database_type") or taw_info.header.database_type
+                region_paths = {int(k): v for k, v in (entry.get("region_paths") or {}).items()}
                 extracted = extractor.extract_to_directory(
-                    local_path, sd_card, preserve_paths=True, overwrite=True
+                    local_path, sd_card, preserve_paths=True, overwrite=True,
+                    region_paths=region_paths or None,
                 )
                 for f in extracted:
                     click.echo(f"    → {f.relative_to(sd_card)}")
@@ -2090,11 +2321,12 @@ def navdata_install(ctx, sd_card: Optional[Path], from_dir: Optional[Path], yes:
 
             click.echo(f"  Copying  {local_path.name}  → {dest_path.relative_to(sd_card)}")
             dest_path.parent.mkdir(parents=True, exist_ok=True)
-            from avcardtool.navdata.garmin.taw_parser import _set_hidden, _clear_readonly
+            from avcardtool.navdata.garmin.taw_parser import _clear_readonly
             if dest_path.exists():
                 _clear_readonly(dest_path)
+            # GADM leaves chart tiles and the raster index (.hif) as plain files;
+            # only the signing file (rasters.xml, from a TAW) is hidden/system/read-only.
             shutil.copy2(local_path, dest_path)
-            _set_hidden(dest_path)
             installed_files.append(dest_path)
 
         else:
@@ -2117,7 +2349,9 @@ def navdata_install(ctx, sd_card: Optional[Path], from_dir: Optional[Path], yes:
         write_feat_unlk_for_file, vol_id_from_card_serial,
         get_vol_id_from_sd_card, encode_volume_id, truncate_system_id,
     )
-    from avcardtool.navdata.garmin.taw_parser import _set_hidden as _set_hidden_attr
+    from avcardtool.navdata.garmin.taw_parser import (
+        _set_garmin_data_attrs, _set_garmin_meta_attrs, _set_plain,
+    )
 
     # Resolve vol_id: prefer manifest card_serial (used at download time),
     # fall back to reading from the mounted block device.
@@ -2150,15 +2384,18 @@ def navdata_install(ctx, sd_card: Optional[Path], from_dir: Optional[Path], yes:
                 feat_unlk_count += 1
 
         if feat_unlk_count:
-            _set_hidden_attr(sd_card / "feat_unlk.dat")
+            _set_garmin_data_attrs(sd_card / "feat_unlk.dat")
             click.echo(f"\nUpdated feat_unlk.dat  ({feat_unlk_count} feature slot(s))")
+        for w in _check_unlock_slots(entries, sd_card):
+            click.echo(f"Warning: {w}", err=True)
+            errors.append(w)
 
         # .evidf.dat — 4 bytes: encoded volume serial (same value embedded in
         # every feat_unlk.dat slot).  Written by GADM on every scan/install.
         evidf_path = sd_card / ".evidf.dat"
         try:
             evidf_path.write_bytes(encode_volume_id(vol_id).to_bytes(4, 'little'))
-            _set_hidden_attr(evidf_path)
+            _set_plain(evidf_path)   # GADM's is a plain file (not hidden)
             click.echo(f"Updated .evidf.dat  (0x{encode_volume_id(vol_id):08X})")
         except Exception as e:
             click.echo(f"Warning: could not write .evidf.dat: {e}", err=True)
@@ -2208,7 +2445,12 @@ def navdata_install(ctx, sd_card: Optional[Path], from_dir: Optional[Path], yes:
             "gadmLastInstalled": _dt.datetime.now(_dt.timezone.utc).strftime(
                 "%a %b %d %Y %H:%M:%S GMT+0000 (Coordinated Universal Time)"
             ),
-            "gadmAvionicsName": existing_gadm.get("gadmAvionicsName", "G3X Touch"),
+            # The device this install was for (GADM rewrites it on every install:
+            # a card moved from a G3X to a GTN says GTN afterwards).
+            "gadmAvionicsName": next(
+                (n for n, t in (manifest.get("device_type_map") or {}).items()
+                 if t == target_db_type),
+                existing_gadm.get("gadmAvionicsName", "G3X Touch")),
             "gadmCardDescription": existing_gadm.get("gadmCardDescription"),
             "gadmTailNumber": tail_number,
             "gadmFleetMetadata": existing_gadm.get("gadmFleetMetadata"),
@@ -2216,7 +2458,8 @@ def navdata_install(ctx, sd_card: Optional[Path], from_dir: Optional[Path], yes:
         if gadm_meta_path.exists():
             from avcardtool.navdata.garmin.taw_parser import _clear_readonly
             _clear_readonly(gadm_meta_path)
-        gadm_meta_path.write_text(json.dumps(gadm))
+        gadm_meta_path.write_text(json.dumps(gadm, separators=(",", ":")))  # compact, as GADM writes it
+        _set_garmin_meta_attrs(gadm_meta_path)
         click.echo("Updated .gadm.meta")
     except Exception as e:
         click.echo(f"Warning: could not update .gadm.meta: {e}", err=True)
@@ -2618,22 +2861,16 @@ def navdata_auto_update(ctx, device: Optional[Path]):
                     continue
 
                 # Hardlink cached files into this card's dir and rebuild manifest entries.
-                for file_entry in dl_state.get(cache_key, {}).get("files", []):
-                    src = cache_dir / file_entry["cache_path"]
-                    dst = card_dir / file_entry["cache_path"]
-                    _link_or_copy(src, dst)
-                    manifest_entries.append({
-                        "local_path": file_entry["cache_path"],
-                        "destination": file_entry["destination"],
-                        "avdb_type": avdb.name,
-                        "avdb_type_id": dl_state[cache_key].get("avdb_type_id", avdb.type_id),
-                        "series_id": dl_state[cache_key].get("series_id", s.series_id),
-                        "issue_name": issue.name,
-                        "device_id": target_dev.device_id,
-                        "removable_paths": dl_state[cache_key].get("removable_paths", []),
-                        "unlock_codes": [],
-                        "taw_database_type": file_entry.get("taw_database_type"),
-                    })
+                entries, err = _manifest_entries_from_cache(
+                    api, cache_dir, card_dir, dl_state.get(cache_key, {}), avdb, s, issue,
+                    target_dev.device_id, target_db_type, [])
+                if err:
+                    msg = f"{err} for {target_dev.name}: not installed"
+                    _log.error(f"  {msg}")
+                    if not is_upcoming:
+                        issues.append(("ERROR", msg))
+                    continue
+                manifest_entries.extend(entries)
                 continue
 
             # slot == "mine" — download now. List files first (no unlock
@@ -2649,16 +2886,9 @@ def navdata_auto_update(ctx, device: Optional[Path]):
 
             # Garmin's list for this device's series is the device's own files.
             card_files = issue_files.main_files + issue_files.auxiliary_files
+            # A TAW whose header names another family (a GTN's 'jg600a-*') is only
+            # installable if the unlock response brings license files (checked below).
             mismatched = _taw_header_mismatches(api, card_files, target_db_type)
-            if mismatched:
-                msg = _unsupported_install_message(
-                    f"{avdb.name} {issue.name}", target_dev.name, mismatched)
-                _log.warning(f"  {msg}")
-                if not is_upcoming:
-                    issues.append(("ERROR", msg))
-                _release_dl_slot(cache_dir, cache_key, [], {}, issue_files.removable_paths,
-                                 avdb.type_id, s.series_id, success=False)
-                continue
             if not card_files:
                 _log.info(f"  {cache_key}: nothing for this card's avionics — skipped")
                 # Not cached as done: Garmin may list the file later, and the
@@ -2691,12 +2921,27 @@ def navdata_auto_update(ctx, device: Optional[Path]):
                                      avdb.type_id, s.series_id, success=False)
                     continue
 
+            license_entries: list = []
+            unlock_files: dict = {}
             try:
-                api.unlock(s.series_id, issue.name, target_dev.device_id)
+                license_entries, unlock_files, _codes = _unlock_for_install(
+                    api, s.series_id, issue.name, target_dev.device_id,
+                    card_dir / str(s.series_id) / issue.name / "licenses", card_dir)
+                if license_entries:
+                    _log.info(f"  Fetched {len(license_entries)} license file(s)")
             except Exception as e:
                 msg = f"Unlock failed for {cache_key}: {e}"
                 _log.warning(f"  {msg}")
                 issues.append(("WARNING", msg))
+            if mismatched and not license_entries:
+                msg = _missing_licenses_message(
+                    f"{avdb.name} {issue.name}", target_dev.name, mismatched)
+                _log.error(f"  {msg}")
+                if not is_upcoming:
+                    issues.append(("ERROR", msg))
+                _release_dl_slot(cache_dir, cache_key, [], {}, issue_files.removable_paths,
+                                 avdb.type_id, s.series_id, success=False)
+                continue
 
             downloaded: list = []
             file_entries: list = []
@@ -2720,6 +2965,8 @@ def navdata_auto_update(ctx, device: Optional[Path]):
 
                     cache_path = str(dest.relative_to(cache_dir))
                     downloaded.append(dest)
+                    taw_region_paths = (_licensed_region_paths(dest, unlock_files)
+                                        if taw_db_type is not None else {})
                     file_entries.append({
                         "cache_path": cache_path,
                         "destination": db_file.destination,
@@ -2738,11 +2985,18 @@ def navdata_auto_update(ctx, device: Optional[Path]):
                         "removable_paths": issue_files.removable_paths,
                         "unlock_codes": [],
                         "taw_database_type": taw_db_type,
+                        **({"region_paths": taw_region_paths} if taw_region_paths else {}),
                     })
                 except Exception as e:
                     msg = f"Download failed for {db_file.file_name}: {e}"
                     _log.error(f"  {msg}")
                     issues.append(("ERROR", msg))
+
+            if downloaded:
+                for lic in license_entries:
+                    manifest_entries.append(_license_manifest_entry(
+                        lic, avdb.name, avdb.type_id, s.series_id, issue.name,
+                        target_dev.device_id))
 
             # Extract per-feature CRCs from the downloaded TAW files (fast path:
             # read last 4 bytes of each raw region — no full extraction needed).
@@ -3359,22 +3613,13 @@ def navdata_update(ctx, device: Optional[Path], aircraft: int, yes: bool):
                     click.echo("    Already installed (CRC match) — skipping.")
                     crc_confirmed[avdb.name] = issue.name
                     continue
-                for file_entry in dl_state.get(dl_cache_key, {}).get("files", []):
-                    src = cache_dir / file_entry["cache_path"]
-                    dst = card_dir / file_entry["cache_path"]
-                    _link_or_copy(src, dst)
-                    manifest_entries.append({
-                        "local_path": file_entry["cache_path"],
-                        "destination": file_entry["destination"],
-                        "avdb_type": avdb.name,
-                        "avdb_type_id": dl_state[dl_cache_key].get("avdb_type_id", avdb.type_id),
-                        "series_id": dl_state[dl_cache_key].get("series_id", s.series_id),
-                        "issue_name": issue.name,
-                        "device_id": target_dev.device_id,
-                        "removable_paths": dl_state[dl_cache_key].get("removable_paths", removable),
-                        "unlock_codes": [],
-                        "taw_database_type": file_entry.get("taw_database_type"),
-                    })
+                entries, err = _manifest_entries_from_cache(
+                    api, cache_dir, card_dir, dl_state.get(dl_cache_key, {}), avdb, s, issue,
+                    target_dev.device_id, target_db_type, removable)
+                if err:
+                    click.echo(f"    {err} for {target_dev.name}: not installed.", err=True)
+                    continue
+                manifest_entries.extend(entries)
                 continue
 
             # slot == "mine" — download now. Get the file list and keep only
@@ -3391,24 +3636,31 @@ def navdata_update(ctx, device: Optional[Path], aircraft: int, yes: bool):
                     _release_dl_slot(cache_dir, dl_cache_key, [], {}, [], avdb.type_id, s.series_id, success=False)
                     continue
 
+            # A TAW whose header names another family (a GTN's 'jg600a-*') is only
+            # installable if the unlock response brings license files (checked below).
             mismatched = _taw_header_mismatches(api, dl_files, target_db_type)
-            if mismatched:
-                click.echo("    " + _unsupported_install_message(
-                    f"{avdb.name} {issue.name}", target_dev.name, mismatched), err=True)
-                _release_dl_slot(cache_dir, dl_cache_key, [], {}, dl_removable,
-                                 avdb.type_id, s.series_id, success=False)
-                continue
             if not dl_files:
                 click.echo("    Nothing here for this card's avionics — skipped.")
                 _release_dl_slot(cache_dir, dl_cache_key, [], {}, dl_removable,
                                  avdb.type_id, s.series_id, success=False)
                 continue
 
+            license_entries: list = []
+            unlock_files: dict = {}
             try:
-                api.unlock(s.series_id, issue.name, target_dev.device_id)
-                click.echo("    Unlocked.")
+                license_entries, unlock_files, _codes = _unlock_for_install(
+                    api, s.series_id, issue.name, target_dev.device_id,
+                    card_dir / str(s.series_id) / issue.name / "licenses", card_dir)
+                click.echo("    Unlocked."
+                           + (f" Fetched {len(license_entries)} license file(s)." if license_entries else ""))
             except Exception as e:
                 click.echo(f"    Warning: unlock failed ({e}) — attempting download anyway.", err=True)
+            if mismatched and not license_entries:
+                click.echo("    " + _missing_licenses_message(
+                    f"{avdb.name} {issue.name}", target_dev.name, mismatched), err=True)
+                _release_dl_slot(cache_dir, dl_cache_key, [], {}, dl_removable,
+                                 avdb.type_id, s.series_id, success=False)
+                continue
 
             downloaded: list = []
             file_entries: list = []
@@ -3427,6 +3679,8 @@ def navdata_update(ctx, device: Optional[Path], aircraft: int, yes: bool):
 
                     cache_path = str(dest.relative_to(cache_dir))
                     downloaded.append(dest)
+                    taw_region_paths = (_licensed_region_paths(dest, unlock_files)
+                                        if taw_db_type is not None else {})
                     file_entries.append({
                         "cache_path": cache_path,
                         "destination": db_file.destination,
@@ -3444,9 +3698,16 @@ def navdata_update(ctx, device: Optional[Path], aircraft: int, yes: bool):
                         "removable_paths": dl_removable,
                         "unlock_codes": [],
                         "taw_database_type": taw_db_type,
+                        **({"region_paths": taw_region_paths} if taw_region_paths else {}),
                     })
                 except Exception as e:
                     click.echo(f"\r    Error downloading {db_file.file_name}: {e}  ", err=True)
+
+            if downloaded:
+                for lic in license_entries:
+                    manifest_entries.append(_license_manifest_entry(
+                        lic, avdb.name, avdb.type_id, s.series_id, issue.name,
+                        target_dev.device_id))
 
             feature_crcs: dict = {}
             for dest in downloaded:

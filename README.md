@@ -110,6 +110,21 @@ If you say Yes, the wizard prompts for your flyGarmin credentials and logs in im
 
 On success, a session token is saved to `<data_dir>/` and used for all future database downloads. You can re-authenticate at any time with `avcardtool navdata login`.
 
+#### Supported avionics
+
+Cards are written the way Garmin's Aviation Database Manager (GADM) writes them, and which database
+files, licenses and `feat_unlk.dat` entries go on a card follows what Garmin's servers return for
+that card's device:
+
+| Avionics | Status |
+|----------|--------|
+| Garmin G3X Touch | Verified against GADM-written cards |
+| Garmin GTN 6XX Xi | Navigation data installs like GADM (`.sff` licenses, `nav_db2.bin`); terrain licenses are also installed. **Verify on a spare card before relying on it** — see [GTN_NAVDATA_NOTES.md](GTN_NAVDATA_NOTES.md) |
+| Other Garmin avionics | Files and licenses Garmin's unlock names are installed generically; a database this tool has no `feat_unlk.dat` slot for installs with a warning (and the display may reject it). Please compare against a GADM-written card and open an issue |
+
+The card's avionics comes from `avionics.txt` in the card root (the device name as flyGarmin lists
+it), else from the existing `feat_unlk.dat`. Install never touches `Garmin/GarminDevice.xml`.
+
 ### Email Notifications
 
 > **Enable email notifications?** *(default: No)*

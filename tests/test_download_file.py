@@ -260,7 +260,7 @@ def test_peek_feature_crcs_non_taw_and_errors():
 
 # --- Refuse files that need Garmin-signed .sff licenses -------------------------
 
-from avcardtool.cli import _taw_header_mismatches, _unsupported_install_message  # noqa: E402
+from avcardtool.cli import _taw_header_mismatches  # noqa: E402
 
 GTN = 0x0402
 
@@ -291,16 +291,14 @@ def test_peek_non_taw_and_errors_give_none():
     assert api.peek_taw_database_type(_taw_file("x.taw")) is None
 
 
-def test_gtn_navigation_file_is_flagged_as_unsupported():
-    """jg600a-*.taw (header G600) for a GTN card needs signed .sff licenses."""
+def test_gtn_navigation_file_is_flagged_as_needing_licenses():
+    """jg600a-*.taw (header G600) for a GTN card is installed with signed .sff licenses."""
     api = _multi_api({"https://avdb.garmin.com/jg600a-us-2611.taw": build_taw(db_type=G600)})
     files = [_taw_file("jg600a-us-2611.taw")]
 
     mismatches = _taw_header_mismatches(api, files, GTN)
 
     assert [(f.file_name, t) for f, t in mismatches] == [("jg600a-us-2611.taw", G600)]
-    msg = _unsupported_install_message("Navigation Data 2611", "GTN 6XX Xi", mismatches)
-    assert "not installed" in msg and "0x01F2" in msg and "GADM" in msg
 
 
 def test_files_matching_the_card_and_non_taw_files_are_fine():
