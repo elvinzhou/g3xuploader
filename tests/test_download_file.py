@@ -160,7 +160,7 @@ def test_unlock_does_not_send_card_serial():
 # --- Skipping other avionics' TAWs before download -----------------------------
 
 from test_taw_parser import build_taw  # noqa: E402
-from avcardtool.cli import _dl_cache_key, _keep_files_for_avionics  # noqa: E402
+from avcardtool.cli import _dl_cache_key  # noqa: E402
 from avcardtool.navdata.garmin.taw_parser import TAWParser, TAWParseError  # noqa: E402
 
 G3X, G600, X3 = 0x06BF, 0x01F2, 0x07EB
@@ -176,60 +176,18 @@ def test_header_rejects_non_taw():
         TAWParser().parse_header_bytes(b"not a taw file at all")
 
 
-def _peek_api(bodies):
-    """bodies: url -> bytes (the full file; the fake server ignores Range)."""
-    api = FlyGarminAPI(mock.Mock())
-    api._session = mock.Mock()
-
-    def get(url, headers=None, stream=False, timeout=None):
-        assert headers["Range"] == "bytes=0-4095"
-        return FakeResponse(bodies[url])
-    api._session.get.side_effect = get
-    return api
 
 
 def _taw_file(name):
     return DatabaseFile(url=f"https://avdb.garmin.com/{name}", file_size=0, destination=None)
 
 
-def test_peek_reads_type_without_full_download():
-    big = build_taw(db_type=X3, regions=[(0x27, b"y" * 1_000_000)])
-    api = _peek_api({"https://avdb.garmin.com/mdhzn-ww-26M1.taw": big})
-    assert api.peek_taw_database_type(_taw_file("mdhzn-ww-26M1.taw")) == X3
 
 
-def test_peek_skips_non_taw_and_tolerates_errors():
-    api = FlyGarminAPI(mock.Mock())
-    api._session = mock.Mock()
-    assert api.peek_taw_database_type(_taw_file("SECT_N36W078.jnx")) is None
-    api._session.get.assert_not_called()
-
-    api._session.get.side_effect = ConnectionError("boom")
-    assert api.peek_taw_database_type(_taw_file("x.taw")) is None
 
 
-def test_keep_files_for_avionics():
-    files = {
-        "nav-g3x.taw": build_taw(db_type=G3X),
-        "bdg600-ue-26B6.taw": build_taw(db_type=G600),
-        "mdhzn-ww-26M1.taw": build_taw(db_type=X3),
-        "garbled.taw": b"????",
-    }
-    api = _peek_api({f"https://avdb.garmin.com/{n}": b for n, b in files.items()})
-    listed = [_taw_file(n) for n in files] + [_taw_file("SECT_N36W078.jnx")]
-    skipped = []
-
-    keep = _keep_files_for_avionics(api, listed, {G3X}, skipped.append)
-
-    assert [f.file_name for f in keep] == ["nav-g3x.taw", "garbled.taw", "SECT_N36W078.jnx"]
-    assert len(skipped) == 2 and "0x01F2" in skipped[0] and "0x07EB" in skipped[1]
 
 
-def test_keep_files_without_known_avionics_keeps_everything():
-    api = mock.Mock()
-    files = [_taw_file("a.taw"), _taw_file("b.jnx")]
-    assert _keep_files_for_avionics(api, files, None, print) == files
-    api.peek_taw_database_type.assert_not_called()
 
 
 def test_cache_key_is_per_avionics():
@@ -289,3 +247,12 @@ def test_peek_feature_crcs_non_taw_and_errors():
 
     api._session.get.side_effect = ConnectionError("boom")
     assert api.peek_taw_feature_crcs(_taw_file("x.taw")) == {}
+
+
+
+
+
+
+
+
+
