@@ -1699,46 +1699,38 @@ def _build_device_type_map(api, devices: list) -> tuple:
 
 
 def _keep_files_for_avionics(api, files: list, wanted: Optional[set], echo,
-                             other_types: Optional[set] = None,
                              fallback_out: Optional[set] = None) -> list:
     """
-    Drop .taw files whose avionics type isn't in *wanted*, reading each
-    TAW's header from its first few KiB (no full download). Files whose
-    type can't be read, and non-TAW files, are kept. wanted=None keeps all.
+    Choose which of a series' files belong to the card's avionics.
 
-    Fallback: some devices are served a TAW whose header names a different
-    avionics family (a GTN 6XX Xi's navigation data is 'jg600a-us-*.taw',
-    header type G600; flyGarmin's own update page offers exactly that file for
-    the GTN). When *other_types* is given and no TAW at all matched, a single
-    dropped TAW whose type belongs to no other device on the aircraft is kept,
-    and its name is added to *fallback_out* so callers sign it with the
+    A series' file list can mix avionics families (e.g. G600 'bdg600-*'
+    obstacle files next to a GTN's), so .taw files are filtered by the avionics
+    type in their header, read from the first few KiB (no full download). Files
+    whose type can't be read, and non-TAW files, are kept. wanted=None keeps all.
+
+    When the list holds a single .taw there is nothing to choose between:
+    Garmin put exactly one file in this device's series (a GTN 6XX Xi's
+    navigation data is 'jg600a-us-*.taw', header type G600, and flyGarmin's own
+    update page offers exactly that file for the GTN), so it is kept even if its
+    header names another family. That only applies when *fallback_out* is given;
+    the file's name is then added to it so the caller can sign it with the
     card's own type instead of the header's.
     """
     if not wanted:
         return list(files)
-    keep, dropped = [], []
+    single_taw = sum(1 for f in files if f.file_name.lower().endswith(".taw")) == 1
+    keep = []
     for f in files:
         db_type = api.peek_taw_database_type(f)
         if db_type is not None and db_type not in wanted:
-            dropped.append((f, db_type))
-            continue
-        keep.append(f)
-
-    if other_types is not None and dropped and not any(
-        f.file_name.lower().endswith(".taw") for f in keep
-    ):
-        spare = [(f, t) for f, t in dropped if t not in other_types]
-        if len(spare) == 1:
-            f, t = spare[0]
-            echo(f"{f.file_name}: its header says avionics type 0x{t:04X}, but Garmin "
-                 f"lists it for this device and nothing else matches — using it")
-            keep.append(f)
-            dropped.remove((f, t))
-            if fallback_out is not None:
+            if single_taw and fallback_out is not None:
+                echo(f"{f.file_name}: its header says avionics type 0x{db_type:04X}, but it "
+                     f"is the only file Garmin lists for this device — using it")
                 fallback_out.add(f.file_name)
-
-    for f, t in dropped:
-        echo(f"Skipping {f.file_name}: for other avionics (db_type 0x{t:04X})")
+            else:
+                echo(f"Skipping {f.file_name}: for other avionics (db_type 0x{db_type:04X})")
+                continue
+        keep.append(f)
     return keep
 
 
@@ -2666,7 +2658,6 @@ def navdata_auto_update(ctx, device: Optional[Path]):
             card_files = _keep_files_for_avionics(
                 api, issue_files.main_files + issue_files.auxiliary_files,
                 {target_db_type}, lambda m: _log.info(f"  {m}"),
-                other_types=set(device_type_map.values()) - {target_db_type},
                 fallback_out=fallback_names)
             if not card_files:
                 _log.info(f"  {cache_key}: nothing for this card's avionics — skipped")
@@ -3399,7 +3390,6 @@ def navdata_update(ctx, device: Optional[Path], aircraft: int, yes: bool):
             fallback_names: set = set()
             dl_files = _keep_files_for_avionics(
                 api, dl_files, {target_db_type}, lambda m: click.echo(f"    {m}"),
-                other_types=set(device_type_map.values()) - {target_db_type},
                 fallback_out=fallback_names)
             if not dl_files:
                 click.echo("    Nothing here for this card's avionics — skipped.")
