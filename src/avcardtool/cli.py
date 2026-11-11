@@ -4077,6 +4077,7 @@ def self_update(ctx, version: Optional[str], system_files_only: bool):
     # so skip the release check and pip upgrade, but still refresh system
     # files (below, as root) so udev rules and systemd units stay current.
     dev_path = _editable_install_path()
+    requested_version = version  # only set when the user passed --version
 
     if not dev_path and version is None:
         try:
@@ -4091,10 +4092,13 @@ def self_update(ctx, version: Optional[str], system_files_only: bool):
         version = latest
 
     if os.geteuid() != 0:
+        # Re-run with exactly 'self-update' (no extra arguments) so the sudoers
+        # rule, which matches arguments exactly, allows it without a password.
+        # The root run repeats the release check itself. An explicit --version
+        # is passed through, but then sudo may ask for a password.
         args = ['sudo', sys.argv[0], 'self-update']
-        if version:
-            # Pass the resolved version so the root run doesn't re-check
-            args += ['--version', version]
+        if requested_version:
+            args += ['--version', requested_version]
         os.execvp('sudo', args)
         # execvp replaces the current process; this line is unreachable
 
