@@ -1528,6 +1528,77 @@ def _release_dl_slot(
         _write_dl_state(cache_dir, state)
 
 
+# Issues kept per series in the download cache: the previous cycle, the
+# current one, and the upcoming one that is pre-downloaded ahead of its
+# effective date. Issue names (e.g. 2611, 26S6) sort chronologically within
+# a series, so the newest three by name are previous/current/next.
+NAVDATA_CACHE_KEEP_ISSUES = 3
+
+
+def _tree_size(path: Path) -> int:
+    total = 0
+    for f in path.rglob("*"):
+        try:
+            if f.is_file():
+                total += f.stat().st_size
+        except OSError:
+            pass
+    return total
+
+
+def _prune_navdata_cache(cache_dir: Path, keep: int = NAVDATA_CACHE_KEEP_ISSUES, log=None) -> int:
+    """
+    Delete downloaded issues older than the newest *keep* per series.
+
+    Removes cache/<series>/<issue>/, its download_state.json entries, and the
+    hardlinked copies under the per-card auto_*/ folders (those links would
+    otherwise keep the data on disk). An issue another process is still
+    downloading is never removed. Returns the bytes freed.
+    """
+    import fcntl
+    import shutil as _shutil
+
+    if not cache_dir.exists():
+        return 0
+    navdata_dir = cache_dir.parent
+
+    with open(cache_dir / _DL_LOCK_FILE, "w") as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)
+        state = _read_dl_state(cache_dir)
+
+        series_issues: dict = {}
+        busy: set = set()
+        for key, entry in state.items():
+            series, _, issue = key.split("@")[0].partition("/")
+            if not issue:
+                continue
+            series_issues.setdefault(series, set()).add(issue)
+            if entry.get("status") == "downloading" and _is_pid_alive(entry.get("pid", 0)):
+                busy.add((series, issue))
+        for series_dir in cache_dir.iterdir():
+            if series_dir.is_dir() and series_dir.name.isdigit():
+                for issue_dir in series_dir.iterdir():
+                    if issue_dir.is_dir():
+                        series_issues.setdefault(series_dir.name, set()).add(issue_dir.name)
+
+        freed = 0
+        for series, issues in series_issues.items():
+            for issue in sorted(issues, reverse=True)[keep:]:
+                if (series, issue) in busy:
+                    continue
+                for target in [cache_dir / series / issue,
+                               *navdata_dir.glob(f"auto_*/{series}/{issue}")]:
+                    if target.is_dir():
+                        freed += _tree_size(target) if target.parent.parent == cache_dir else 0
+                        _shutil.rmtree(target, ignore_errors=True)
+                for key in [k for k in state if k.split("@")[0] == f"{series}/{issue}"]:
+                    del state[key]
+                if log:
+                    log.info(f"  Pruned old navdata cache: series {series} issue {issue}")
+        _write_dl_state(cache_dir, state)
+    return freed
+
+
 def _link_or_copy(src: Path, dst: Path) -> None:
     """Hardlink src → dst within the same filesystem, copy otherwise."""
     import shutil as _shutil
@@ -2708,6 +2779,14 @@ def navdata_auto_update(ctx, device: Optional[Path]):
             notify_manager.notify(build_navdata_update_failed_event(issues))
     else:
         _log.info("Navdata dry run completed." if dry_run else "Navdata update completed successfully.")
+
+    if not dry_run:
+        try:
+            freed = _prune_navdata_cache(data_dir / "navdata" / "cache", log=_log)
+            if freed:
+                _log.info(f"Navdata cache pruned: freed {freed / 1e6:,.0f} MB")
+        except Exception as e:
+            _log.warning(f"Navdata cache pruning failed: {e}")
 
     if _we_mounted:
         try:
@@ -3970,8 +4049,15 @@ def notify_test(ctx):
     help='Install a specific version (e.g. 1.2.0), even if it is not newer. '
          'Defaults to the latest release, installed only if newer than this one.'
 )
+@click.option(
+    '--system-files-only',
+    is_flag=True,
+    hidden=True,
+    help='Internal: skip the pip upgrade and only refresh udev/systemd files. '
+         'Used so the files are updated by the newly installed code.'
+)
 @click.pass_context
-def self_update(ctx, version: Optional[str]):
+def self_update(ctx, version: Optional[str], system_files_only: bool):
     """
     Update avcardtool to the latest release from GitHub, if it is newer.
 
@@ -4012,6 +4098,12 @@ def self_update(ctx, version: Optional[str]):
         os.execvp('sudo', args)
         # execvp replaces the current process; this line is unreachable
 
+    if system_files_only:
+        # Re-launched by the upgrade below so this process runs the new code.
+        click.echo(f"Updating system files with v{__version__}...")
+        _update_system_files(ctx, version)
+        return
+
     click.echo(f"Current version: v{__version__}")
 
     if dev_path:
@@ -4043,7 +4135,18 @@ def self_update(ctx, version: Optional[str]):
     new_version = installed_match.group(1) if installed_match else version
     click.echo(f"Installed v{new_version}.")
 
-    _update_system_files(ctx, new_version)
+    # pip replaced the package on disk, but this process still runs the old
+    # code, so any change to how system files are updated (timers, paths, new
+    # units) would only take effect on the next run. Re-launch the freshly
+    # installed binary for that step instead.
+    sys.stdout.flush()
+    try:
+        os.execv(sys.argv[0], [sys.argv[0], *sys.argv[1:],
+                               '--system-files-only', '--version', new_version])
+    except OSError as e:
+        click.echo(f"  Could not re-launch the new version ({e}); "
+                   f"updating system files with v{__version__}.", err=True)
+        _update_system_files(ctx, new_version)
 
 
 _RELEASES_LATEST_URL = "https://api.github.com/repos/elvinzhou/g3xuploader/releases/latest"
