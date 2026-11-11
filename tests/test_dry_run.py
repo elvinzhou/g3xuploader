@@ -431,3 +431,26 @@ class TestNonFlightOverride:
         assert result.exit_code == 0, result.output
         assert "Flight detected" in result.output
         assert "ending adjusted" not in result.output
+
+
+# ---------------------------------------------------------------------------
+# systemd units must call commands that exist
+# ---------------------------------------------------------------------------
+
+def _systemd_commands():
+    import re
+    unit_dir = Path(__file__).parent.parent / "systemd"
+    for unit in sorted(unit_dir.glob("*.service")):
+        for line in unit.read_text().splitlines():
+            m = re.match(r"ExecStart=\S*/avcardtool\s+(.*)", line)
+            if m:
+                words = [w for w in m.group(1).split() if not w.startswith(("/", "-"))]
+                yield pytest.param(words, id=f"{unit.name}: {' '.join(words)}")
+
+
+@pytest.mark.parametrize("words", _systemd_commands())
+def test_systemd_exec_commands_are_registered(words):
+    """A unit running `avcardtool navdata auto-update` fails silently if the
+    command isn't registered (as happened when its decorator was dropped)."""
+    result = CliRunner().invoke(cli, [*words, "--help"])
+    assert result.exit_code == 0, result.output

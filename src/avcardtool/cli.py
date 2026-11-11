@@ -2205,6 +2205,9 @@ def navdata_install(ctx, sd_card: Optional[Path], from_dir: Optional[Path], yes:
         click.echo(f"\nInstalled {len(installed_files)} file(s) to {sd_card}")
 
 
+@navdata.command('auto-update')
+@click.argument('device', type=click.Path(path_type=Path, readable=False), required=False)
+@click.pass_context
 def navdata_auto_update(ctx, device: Optional[Path]):
     """
     Silently update all inserted SD cards with latest navigation databases.
