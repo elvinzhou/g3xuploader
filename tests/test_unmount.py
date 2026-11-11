@@ -48,3 +48,40 @@ def test_unmount_card_wrapper_does_not_raise():
     with mock.patch("subprocess.run", side_effect=_run_factory(calls, udisks_rc=1)):
         SDCardDetector().unmount_card("/media/pilot/CARD")  # logs a warning only
     assert ["udisksctl", "unmount", "--block-device", "/dev/sde1"] in calls
+
+
+# ---------------------------------------------------------------------------
+# findmnt prints each mount twice inside the sandboxed systemd units
+# ---------------------------------------------------------------------------
+
+def _findmnt(out):
+    return lambda cmd, **kw: SimpleNamespace(returncode=0, stdout=out, stderr="")
+
+
+def test_get_mount_point_ignores_duplicated_findmnt_output():
+    from avcardtool.core.utils import get_mount_point
+
+    out = "/media/pilot/6636-6364\n/media/pilot/6636-6364\n"
+    with mock.patch("subprocess.run", side_effect=_findmnt(out)):
+        assert get_mount_point(Path("/dev/sdb1")) == Path("/media/pilot/6636-6364")
+
+
+def test_is_mounted_readonly_with_duplicated_output():
+    from avcardtool.core.utils import _is_mounted_readonly
+
+    ro = "ro,nosuid,errors=remount-ro\nro,nosuid,errors=remount-ro\n"
+    rw = "rw,nosuid,errors=remount-ro\nrw,nosuid,errors=remount-ro\n"
+    with mock.patch("subprocess.run", side_effect=_findmnt(ro)):
+        assert _is_mounted_readonly(Path("/dev/sdb1")) is True
+    with mock.patch("subprocess.run", side_effect=_findmnt(rw)):
+        assert _is_mounted_readonly(Path("/dev/sdb1")) is False
+
+
+def test_unmount_with_duplicated_source_output():
+    calls = []
+    with mock.patch(
+        "subprocess.run",
+        side_effect=_run_factory(calls, findmnt_out="/dev/sde1\n/dev/sde1\n"),
+    ):
+        unmount_device(Path("/media/pilot/CARD"))
+    assert ["udisksctl", "unmount", "--block-device", "/dev/sde1"] in calls

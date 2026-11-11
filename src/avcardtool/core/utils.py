@@ -108,6 +108,20 @@ def is_sd_card(device_path: Path) -> bool:
     return False
 
 
+def _first_line(text: str) -> str:
+    """
+    First non-empty line of findmnt output.
+
+    Inside a sandboxed systemd unit (ProtectSystem= with ReadWritePaths=/media)
+    the same mount is listed twice, so findmnt prints its target/source/options
+    two times; using the whole output as one value yields a bogus path.
+    """
+    for line in text.splitlines():
+        if line.strip():
+            return line.strip()
+    return ""
+
+
 def get_mount_point(device_path: Path) -> Optional[Path]:
     """
     Get the mount point for a device.
@@ -126,8 +140,8 @@ def get_mount_point(device_path: Path) -> Optional[Path]:
             check=False
         )
 
-        if result.returncode == 0 and result.stdout.strip():
-            return Path(result.stdout.strip())
+        if result.returncode == 0 and _first_line(result.stdout):
+            return Path(_first_line(result.stdout))
     except Exception:
         pass
 
@@ -141,8 +155,8 @@ def _is_mounted_readonly(device_path: Path) -> bool:
             ['findmnt', '-n', '-o', 'OPTIONS', str(device_path)],
             capture_output=True, text=True, check=False,
         )
-        if result.returncode == 0 and result.stdout.strip():
-            opts = result.stdout.strip().split(',')
+        if result.returncode == 0 and _first_line(result.stdout):
+            opts = _first_line(result.stdout).split(',')
             return 'ro' in opts
     except Exception:
         pass
@@ -265,7 +279,7 @@ def unmount_device(mount_point: Path) -> None:
         ['findmnt', '-n', '-o', 'SOURCE', '--target', str(mount_point)],
         capture_output=True, text=True, check=False,
     )
-    device = source.stdout.strip() if source.returncode == 0 else ""
+    device = _first_line(source.stdout) if source.returncode == 0 else ""
     if device.startswith('/dev/'):
         result = subprocess.run(
             ['udisksctl', 'unmount', '--block-device', device],
