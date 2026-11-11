@@ -98,3 +98,52 @@ def test_empty_complete_entry_is_not_a_cache_hit(tmp_path):
 
     assert cli_mod._acquire_dl_slot(cache, "2230/2611@0402") == "mine"   # re-check it
     assert cli_mod._acquire_dl_slot(cache, "2054/2611@06BF") == "cached"
+
+
+# ---------------------------------------------------------------------------
+# GTN: a TAW whose header names another family is signed with the card's type
+# ---------------------------------------------------------------------------
+
+def test_install_signs_fallback_taw_with_the_cards_avionics_type(tmp_path):
+    from click.testing import CliRunner
+    from test_taw_parser import build_taw
+    from avcardtool.cli import cli
+    from avcardtool.navdata.garmin.feat_unlk import (
+        Feature, SEC_ID_OFFSET, SLOT_SIZE, update_feat_unlk, vol_id_from_card_serial,
+    )
+
+    GTN, G600 = 0x0402, 0x01F2
+
+    # A GTN card previously loaded by Garmin's tool: NAVIGATION slot signed 0x0402
+    card = tmp_path / "card"
+    card.mkdir()
+    vol = vol_id_from_card_serial("6130-6664")
+    update_feat_unlk(card, Feature.NAVIGATION, vol, GTN, 0x3430060F2024F, 0x1234, None)
+
+    # The download: header says G600, but Garmin served it to the GTN
+    dl = tmp_path / "dl"
+    (dl / "2230" / "2611").mkdir(parents=True)
+    (dl / "2230" / "2611" / "jg600a-us-2611.taw").write_bytes(
+        build_taw(db_type=G600, regions=[(0x01, os.urandom(5000))]))   # ldr_sys/avtn_db.bin
+    (dl / "navdata_manifest.json").write_text(json.dumps({
+        "card_serial": "6130-6664",
+        "system_ids": [0x3430060F2024F],
+        "entries": [{
+            "local_path": "2230/2611/jg600a-us-2611.taw", "destination": None,
+            "avdb_type": "Navigation Data", "avdb_type_id": 1, "series_id": 2230,
+            "issue_name": "2611", "device_id": 4244058, "removable_paths": [],
+            "unlock_codes": [],
+            "taw_database_type": GTN,   # effective type recorded for the fallback file
+        }],
+    }))
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps({"system": {
+        "data_dir": str(tmp_path / "data"), "log_file": str(tmp_path / "x.log")}}))
+
+    result = CliRunner().invoke(cli, [
+        "--config", str(cfg), "navdata", "install", str(card), "--from", str(dl), "-y"])
+    assert (card / "ldr_sys" / "avtn_db.bin").exists(), result.output
+
+    slot = (card / "feat_unlk.dat").read_bytes()[:SLOT_SIZE]
+    signed_with = (int.from_bytes(slot[2:4], "little") + SEC_ID_OFFSET) & 0xFFFF
+    assert signed_with == GTN, f"signed with 0x{signed_with:04X}"
