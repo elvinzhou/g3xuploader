@@ -378,6 +378,44 @@ class FlyGarminAPI:
         resp.raise_for_status()
         return resp.json()
 
+    def download_unlock_files(self, unlock_resp: dict, output_dir: Path) -> List[tuple]:
+        """
+        Download the files an unlock response lists (``files[]``).
+
+        Garmin's tool installs a GTN's navigation data with per-unit signed
+        license files (``*.sff``) plus ``ldr_sys/grm_feat_key.zip``; the unlock
+        response carries them as ``{url, destination, sendAuthorization}``.
+        Only Garmin can sign them, so they must come from here.
+
+        The bearer token is sent only to https://*.garmin.com URLs, whatever
+        the response says. Each file is saved under its ``destination`` inside
+        *output_dir* (``ldr_sys/x`` -> ``output_dir/ldr_sys/x``).
+
+        Returns [(local_path, destination)], destination as the card-relative path.
+        """
+        out: List[tuple] = []
+        for f in unlock_resp.get("files") or []:
+            url = f.get("url") or ""
+            dest_rel = (f.get("destination") or "").replace("\\", "/").lstrip("/")
+            if not url or not dest_rel or ".." in dest_rel.split("/"):
+                raise GarminAPIError(f"Unusable file entry in unlock response: {dest_rel!r}")
+            headers = {}
+            if f.get("sendAuthorization"):
+                parsed = urlparse(url)
+                host = (parsed.hostname or "").lower()
+                if parsed.scheme != "https" or not (host == "garmin.com" or host.endswith(".garmin.com")):
+                    raise GarminAPIError(
+                        f"Refusing to send credentials to a non-Garmin host for {dest_rel}")
+                headers = self._auth_headers()
+            resp = self._session.get(url, headers=headers, timeout=60)
+            resp.raise_for_status()
+            local = output_dir / dest_rel
+            local.parent.mkdir(parents=True, exist_ok=True)
+            local.write_bytes(resp.content)
+            logger.info(f"Downloaded unlock file {dest_rel} ({len(resp.content):,} bytes)")
+            out.append((local, dest_rel))
+        return out
+
     def report_installed_issues(
         self,
         installations: List[dict],
@@ -462,6 +500,24 @@ class FlyGarminAPI:
             return None
 
     TAW_HEADER_PEEK_BYTES = 4096
+
+    def peek_taw_database_type(self, db_file: DatabaseFile) -> Optional[int]:
+        """
+        Avionics type (TAW header database_type) of a .taw file, read from its
+        first few KiB instead of downloading the whole file. None for non-TAW
+        files or if the header can't be read.
+        """
+        if not db_file.file_name.lower().endswith(".taw"):
+            return None
+        from avcardtool.navdata.garmin.taw_parser import TAWParser
+        try:
+            data = self._range_bytes(db_file.url, 0, self.TAW_HEADER_PEEK_BYTES)
+            if not data:
+                return None
+            return TAWParser().parse_header_bytes(data).database_type
+        except Exception as e:
+            logger.debug(f"Could not read TAW header of {db_file.file_name}: {e}")
+            return None
 
     def _range_bytes(self, url: str, start: int, length: int) -> Optional[bytes]:
         """Fetch ``length`` bytes at ``start`` with an HTTP Range request.

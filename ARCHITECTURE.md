@@ -205,8 +205,12 @@ GET /avdb-series/<seriesID>/<issueName>/unlock/
     ?deviceIDs=<device.id>
     &cardSerial=<sd-card-volume-serial>
     Authorization: BatchUpdate id="<batch-uuid>"
-    → { "unlockCode": "...", ... }
+    → { "files": [...], "unlockCodes": [...], "unlockData": [...] }
 ```
+
+(The response carries more than an unlock code: for some avionics it lists
+license files to install and where each database goes — see
+[Writing a Card the Way GADM Does](#writing-a-card-the-way-gadm-does).)
 
 Note: `cardSerial` is the volume serial number of the SD card (obtainable on
 Linux via `lsblk -o SERIAL` or by reading the FAT32 volume ID bytes).
@@ -296,7 +300,7 @@ AVCardTool mirrors this flow exactly:
 | File list | `GET /files/` | `FlyGarminAPI.list_files()` |
 | HEAD check | `HEAD avdb.garmin.com/<file>` (no auth) | `FlyGarminAPI.check_file()` |
 | Download | `GET avdb.garmin.com/<file>` stream | `FlyGarminAPI.download_file()` |
-| Install | TAW extraction + SD card write | `taw_parser.py` + `sdcard.py` (in progress) |
+| Install | TAW extraction + unlock licenses + `feat_unlk.dat` | `navdata install` in `cli.py`, `taw_parser.py`, `feat_unlk.py` — see [Writing a Card the Way GADM Does](#writing-a-card-the-way-gadm-does) |
 
 **Fallback behavior**: If `POST /batch-updates/` fails (network error, API change),
 `avcardtool navdata download` falls back to direct Bearer-token unlock
@@ -314,6 +318,110 @@ TAW is Garmin's proprietary container format. Files have a typed header
 identifying the database and region, followed by compressed content.
 The `destination` field in the `files/` API response specifies the target
 subdirectory on the SD card (e.g. `Garmin/terrain/`).
+
+## Writing a Card the Way GADM Does
+
+`avcardtool navdata install` (and the `auto-update` / `update` commands that call
+it) reproduce what Garmin's Aviation Database Manager (GADM) writes. Everything
+below was verified byte-for-byte against GADM-written G3X Touch and GTN 6XX Xi
+cards unless marked *unverified*.
+
+### The unlock response decides what else gets installed
+
+`GET /avdb-series/<series>/<issue>/unlock/?deviceIDs=<id>` is called for every
+database, with the Bearer token. The response (probed 2026-11) is:
+
+```
+{ "files":       [ {url, destination, sendAuthorization, hidden}, ... ],
+  "unlockCodes": [ {deviceID, unlockCode, gma, gca} ],
+  "unlockData":  [ {avdbType, avdbTypeVersion, featureUnlockSlot,
+                    featureUnlockFlag, featureUnlockFilename}, ... ] }
+```
+
+| Device / database | `files` | `unlockData` |
+|---|---|---|
+| G3X Touch, every database | `[]` | `[]` |
+| GTN 6XX Xi navigation data (`jg600a-*.taw`) | `avtn_db.bin.sff`, `nav_db2.bin.sff`, `ldr_sys/grm_feat_key.zip` | v1 slot 0 `ldr_sys/avtn_db.bin`; v2 slot 14 `ldr_sys/nav_db2.bin` |
+| GTN 6XX Xi terrain (`tgtn-*.taw`) | `trn.dat.sff`, `ldr_sys/grm_feat_key.zip` | v2 slot 2 flag 1 `trn.dat` |
+
+No device is special-cased. `_unlock_for_install()` downloads whatever `files[]`
+lists (the `.sff` files are signed per unit by Garmin and cannot be generated
+locally) and the install copies each to its `destination` as a plain file. A
+device whose unlock lists nothing (G3X) installs exactly as before.
+
+- The bearer token is sent only to `https://*.garmin.com` URLs
+  (`FlyGarminAPI.download_unlock_files`); `destination`s containing `..` are rejected.
+- Licenses are per unit, so they are **never cached**. Every cache hit unlocks
+  again for the card's device (`_manifest_entries_from_cache`).
+- A TAW whose header `database_type` differs from the card's (GTN nav data is
+  `jg600a-*`, header 0x01F2, on a 0x0402 card) is only installed if its unlock
+  brought licenses; otherwise the run reports an error (`_missing_licenses_message`).
+
+### Where TAW regions go
+
+A TAW region is only a numeric id; the default path per id is
+`taw_parser.TAW_REGION_PATHS`. `unlockData[].featureUnlockFilename` names the files
+Garmin writes, but not which region feeds which (the 4 "unknown" header bytes of a
+region carry no version; checked against real TAWs). `_licensed_region_paths()`
+therefore pairs them: regions whose default path is already named by the unlock keep
+it, and the remaining names (ordered by `avdbTypeVersion`) take the remaining regions
+(ordered by id). For the GTN nav TAW this sends region 0x01 to `ldr_sys/avtn_db.bin`
+and region 0x02 to `ldr_sys/nav_db2.bin`; for GTN terrain nothing is overridden
+(region 0x23 is already `trn.dat`). The result is stored as `region_paths` in the
+manifest entry and passed to `TAWExtractor.extract_to_directory(region_paths=...)`.
+
+### feat_unlk.dat
+
+913-byte slots, one per database, at `featureUnlockSlot * 913`. Each holds the
+encoded volume serial, the database file's embedded CRC and the avionics System ID,
+signed with the card's product code (`security_id`, e.g. 0x0402 GTN, 0x06BF G3X).
+
+| Slot | Offset | Feature | Files |
+|---|---|---|---|
+| 0 | 0 | NAVIGATION | `ldr_sys/avtn_db.bin` (+17 preview bytes) |
+| 1 | 913 | (not seen on any card) | |
+| 2 | 1826 | TERRAIN | `terrain_9as.tdb`, `trn.dat` |
+| 3 | 2739 | OBSTACLE | `terrain.odb`, `obstacle.odb` |
+| 4 | 3652 | APT_TERRAIN | `terrain.adb` |
+| 6 | 5478 | SAFETAXI | `safetaxi.bin` |
+| 7 | 6391 | FLITE_CHARTS | `fc_tpc/fc_tpc.dat` |
+| 8 | 7304 | BASEMAP | `bmap.bin` |
+| 9 | 8217 | AIRPORT_DIR | `fbo.gpi` |
+| 12 | 10956 | SECTIONALS | `rasters/rasters.xml` |
+| 14 | 12782 | NAV_DB2 | `ldr_sys/nav_db2.bin` (GTN) |
+
+Slots GADM wrote for another device on the same card are left alone (their System
+ID stays that device's). After installing, `_check_unlock_slots()` compares the
+unlock's `featureUnlockFilename`/`featureUnlockSlot` with this table and **warns**
+when a file the unlock names has no slot layout here (new avionics or database) or a
+different slot: the file and its licenses are still installed, but its slot can't be
+written, so the display may reject it.
+
+### Other card files
+
+| File | Written as | Attributes (GADM) |
+|---|---|---|
+| database files extracted from a TAW (`avtn_db.bin`, `nav_db2.bin`, `terrain.odb`, `trn.dat`, `fc_tpc.*`, `rasters.xml`, ...) and `feat_unlk.dat` | raw region data | hidden + system + read-only |
+| `.gadm.meta` | JSON; `gadmAvionicsName` is the card's device name; `gadmLastInstalled` is UTC ("GMT+0000") | hidden + read-only |
+| `.evidf.dat` | 4 bytes, encoded volume serial | plain |
+| `.sff` licenses, `ldr_sys/grm_feat_key.zip` | verbatim from the unlock response | plain |
+| `.jnx` tiles, `rasters.hif` | copied from the download | plain |
+| `Garmin/GarminDevice.xml` | never touched (the display owns it; GADM doesn't update it either) | |
+
+Attributes are applied with `fatattr` on Linux/FAT (`taw_parser._set_garmin_data_attrs`
+and friends); on non-FAT filesystems (tests, scratch dirs) they are skipped.
+
+### Unseen avionics: what generalizes and what doesn't
+
+Works for any avionics Garmin serves the same way, with no code change: the card's
+`database_type` comes from `avionics.txt`, the `feat_unlk.dat` navigation slot or the
+manifest; the device is matched through `/device-models/`; licenses, their
+destinations and the extra database filenames all come from the unlock response.
+
+Still hard-coded (see the TODO list in `GTN_NAVDATA_NOTES.md`): the slot layout and
+feature bits above (`feat_unlk.Feature`), the default region paths, and the file
+attributes. A new database type therefore installs with a warning until its slot is
+added, and it should be checked against a GADM-written card first.
 
 ## Authentication Details
 

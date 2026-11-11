@@ -31,7 +31,7 @@ _NON_FAT_DEVICES: set = set()
 
 
 def _fatattr(flags: str, path: Path) -> None:
-    """Run fatattr with the given flags (e.g. '+h', '-r', '+r') on a FAT file."""
+    """Run fatattr with the given flags (e.g. '+h', '-r', '+h +s +r') on a FAT file."""
     import os
     import subprocess
     try:
@@ -41,7 +41,7 @@ def _fatattr(flags: str, path: Path) -> None:
     if dev is not None and dev in _NON_FAT_DEVICES:
         return
     try:
-        result = subprocess.run(["fatattr", flags, str(path)],
+        result = subprocess.run(["fatattr", *flags.split(), str(path)],
                                 capture_output=True, timeout=5)
         if result.returncode != 0:
             err = result.stderr.decode(errors="replace").strip()
@@ -68,6 +68,32 @@ def _set_hidden(path: Path) -> None:
     hidden attribute; this just keeps the card visually clean on Windows.
     """
     _fatattr("+h", path)
+
+
+def _set_garmin_data_attrs(path: Path) -> None:
+    """
+    Hidden + system + read-only: the attributes Garmin's GADM gives database files
+    (avtn_db.bin, nav_db2.bin, terrain.odb, fc_tpc.*, rasters.xml, feat_unlk.dat, ...).
+    """
+    _fatattr("+h +s +r", path)
+    try:
+        path.chmod(0o444)
+    except OSError as e:
+        logger.debug(f"chmod 444 {path.name}: {e}")
+
+
+def _set_garmin_meta_attrs(path: Path) -> None:
+    """Hidden + read-only (no system): the attributes GADM gives .gadm.meta."""
+    _fatattr("+h +r", path)
+    try:
+        path.chmod(0o444)
+    except OSError as e:
+        logger.debug(f"chmod 444 {path.name}: {e}")
+
+
+def _set_plain(path: Path) -> None:
+    """Clear hidden/system/read-only: GADM leaves .evidf.dat, .sff licenses etc. plain."""
+    _fatattr("-h -s -r", path)
 
 
 def _set_readonly(path: Path) -> None:
@@ -538,7 +564,8 @@ class TAWExtractor:
         taw_file: Path, 
         output_dir: Path,
         preserve_paths: bool = True,
-        overwrite: bool = False
+        overwrite: bool = False,
+        region_paths: Optional[Dict[int, str]] = None,
     ) -> List[Path]:
         """
         Extract TAW file contents to a directory.
@@ -572,9 +599,13 @@ class TAWExtractor:
                     )
                     continue
 
-                output_path = self._get_output_path(
-                    output_dir, region, preserve_paths
-                )
+                if region_paths and region.region_type in region_paths:
+                    # e.g. a GTN's region 0x02 is ldr_sys/nav_db2.bin, not basemap.bin
+                    output_path = output_dir / region_paths[region.region_type]
+                else:
+                    output_path = self._get_output_path(
+                        output_dir, region, preserve_paths
+                    )
 
                 if output_path.exists() and not overwrite:
                     logger.warning(f"Skipping existing file: {output_path}")
@@ -603,9 +634,10 @@ class TAWExtractor:
                         # Clear data from memory
                         del data
 
-                    # Set FAT hidden attribute to match what Garmin's own client
-                    # produces. Uses fatattr on Linux if available; silent on failure.
-                    _set_hidden(output_path)
+                    # Match the attributes Garmin's own client gives database files
+                    # (hidden, system, read-only). Uses fatattr on Linux if available;
+                    # silent on failure.
+                    _set_garmin_data_attrs(output_path)
 
                     logger.info(f"Extracted: {output_path} ({region.uncompressed_size} bytes)")
                     extracted_files.append(output_path)

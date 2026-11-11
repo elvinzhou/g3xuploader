@@ -119,6 +119,10 @@ class Feature(Enum):
     BASEMAP      = ( 7304, 10, ['bmap.bin'])
     AIRPORT_DIR  = ( 8217, 10, ['apt_dir.gca', 'fbo.gpi'])
     SECTIONALS   = (10956, 10, ['rasters/rasters.xml', 'rasters.xml'])
+    # GTN 6XX Xi second navigation file (TAW region 0x02). Current GADM signs it
+    # in slot 14 (14 * 913) with the file's CRC, no preview bytes (verified
+    # byte-identical against a GADM-written GTN card).
+    NAV_DB2      = (12782, 10, ['ldr_sys/nav_db2.bin', 'nav_db2.bin'])
 
     def __init__(self, offset: int, bit: int, filenames: list):
         self.offset = offset

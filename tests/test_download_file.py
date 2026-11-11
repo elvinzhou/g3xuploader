@@ -256,3 +256,53 @@ def test_peek_feature_crcs_non_taw_and_errors():
 
 
 
+
+
+# --- Refuse files that need Garmin-signed .sff licenses -------------------------
+
+from avcardtool.cli import _taw_header_mismatches  # noqa: E402
+
+GTN = 0x0402
+
+
+def _multi_api(bodies):
+    """Fake API whose Range reads serve several files by URL."""
+    api = FlyGarminAPI(mock.Mock())
+    api._session = mock.Mock()
+
+    def get(url, headers=None, stream=False, timeout=None):
+        return RangeServer(bodies[url]).get(url, headers=headers)
+
+    api._session.get.side_effect = get
+    return api
+
+
+def test_peek_reads_the_avionics_type_with_one_small_range_request():
+    server = RangeServer(build_taw(db_type=G600, regions=[(0x01, b"x" * 1_000_000)]))
+    assert _crc_api(server).peek_taw_database_type(_taw_file("jg600a-us-2611.taw")) == G600
+    assert server.ranges == [(0, 4095)]
+
+
+def test_peek_non_taw_and_errors_give_none():
+    api = FlyGarminAPI(mock.Mock())
+    api._session = mock.Mock()
+    assert api.peek_taw_database_type(_taw_file("SECT_N36W078.jnx")) is None
+    api._session.get.side_effect = ConnectionError("boom")
+    assert api.peek_taw_database_type(_taw_file("x.taw")) is None
+
+
+def test_gtn_navigation_file_is_flagged_as_needing_licenses():
+    """jg600a-*.taw (header G600) for a GTN card is installed with signed .sff licenses."""
+    api = _multi_api({"https://avdb.garmin.com/jg600a-us-2611.taw": build_taw(db_type=G600)})
+    files = [_taw_file("jg600a-us-2611.taw")]
+
+    mismatches = _taw_header_mismatches(api, files, GTN)
+
+    assert [(f.file_name, t) for f, t in mismatches] == [("jg600a-us-2611.taw", G600)]
+
+
+def test_files_matching_the_card_and_non_taw_files_are_fine():
+    api = _multi_api({"https://avdb.garmin.com/tgtn-amrn-20T1.taw": build_taw(db_type=GTN)})
+    files = [_taw_file("tgtn-amrn-20T1.taw"), _taw_file("SECT_N36W078.jnx")]
+    assert _taw_header_mismatches(api, files, GTN) == []
+    assert _taw_header_mismatches(api, files, None) == []   # card type unknown: no opinion
