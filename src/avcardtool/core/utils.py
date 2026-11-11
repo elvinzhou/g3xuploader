@@ -108,6 +108,20 @@ def is_sd_card(device_path: Path) -> bool:
     return False
 
 
+def _first_line(text: str) -> str:
+    """
+    First non-empty line of findmnt output.
+
+    Inside a sandboxed systemd unit (ProtectSystem= with ReadWritePaths=/media)
+    the same mount is listed twice, so findmnt prints its target/source/options
+    two times; using the whole output as one value yields a bogus path.
+    """
+    for line in text.splitlines():
+        if line.strip():
+            return line.strip()
+    return ""
+
+
 def get_mount_point(device_path: Path) -> Optional[Path]:
     """
     Get the mount point for a device.
@@ -126,8 +140,8 @@ def get_mount_point(device_path: Path) -> Optional[Path]:
             check=False
         )
 
-        if result.returncode == 0 and result.stdout.strip():
-            return Path(result.stdout.strip())
+        if result.returncode == 0 and _first_line(result.stdout):
+            return Path(_first_line(result.stdout))
     except Exception:
         pass
 
@@ -141,8 +155,8 @@ def _is_mounted_readonly(device_path: Path) -> bool:
             ['findmnt', '-n', '-o', 'OPTIONS', str(device_path)],
             capture_output=True, text=True, check=False,
         )
-        if result.returncode == 0 and result.stdout.strip():
-            opts = result.stdout.strip().split(',')
+        if result.returncode == 0 and _first_line(result.stdout):
+            opts = _first_line(result.stdout).split(',')
             return 'ro' in opts
     except Exception:
         pass
@@ -250,19 +264,33 @@ def unmount_device(mount_point: Path) -> None:
     """
     Unmount a device, preferring udisksctl (no root required) over umount.
 
+    udisksctl has no --mount-point option, so the block device backing the
+    mount point is looked up first and passed with -b.
+
     Args:
         mount_point: Path to mount point
 
     Raises:
         RuntimeError: If unmount fails
     """
-    result = subprocess.run(
-        ['udisksctl', 'unmount', '--mount-point', str(mount_point)],
-        capture_output=True,
-        text=True
+    errors = []
+
+    source = subprocess.run(
+        ['findmnt', '-n', '-o', 'SOURCE', '--target', str(mount_point)],
+        capture_output=True, text=True, check=False,
     )
-    if result.returncode == 0:
-        return
+    device = _first_line(source.stdout) if source.returncode == 0 else ""
+    if device.startswith('/dev/'):
+        result = subprocess.run(
+            ['udisksctl', 'unmount', '--block-device', device],
+            capture_output=True,
+            text=True
+        )
+        if result.returncode == 0:
+            return
+        errors.append(f"udisksctl: {(result.stderr or result.stdout).strip()}")
+    else:
+        errors.append(f"could not find the device mounted at {mount_point}")
 
     # Fallback: direct umount (requires root)
     result = subprocess.run(
@@ -271,7 +299,8 @@ def unmount_device(mount_point: Path) -> None:
         text=True
     )
     if result.returncode != 0:
-        raise RuntimeError(f"Failed to unmount {mount_point}: {result.stderr}")
+        errors.append(f"umount: {result.stderr.strip()}")
+        raise RuntimeError(f"Failed to unmount {mount_point}: {'; '.join(errors)}")
 
 
 def format_duration(seconds: float) -> str:

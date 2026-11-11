@@ -402,7 +402,8 @@ def get_vol_id_from_sd_card(sd_card_path: Path) -> Optional[int]:
             capture_output=True, text=True, timeout=5,
         )
         if r.returncode == 0:
-            device = r.stdout.strip()
+            # A sandboxed unit lists the mount twice; take the first line only
+            device = next((l.strip() for l in r.stdout.splitlines() if l.strip()), None)
     except Exception:
         pass
 
