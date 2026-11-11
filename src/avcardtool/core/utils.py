@@ -250,19 +250,33 @@ def unmount_device(mount_point: Path) -> None:
     """
     Unmount a device, preferring udisksctl (no root required) over umount.
 
+    udisksctl has no --mount-point option, so the block device backing the
+    mount point is looked up first and passed with -b.
+
     Args:
         mount_point: Path to mount point
 
     Raises:
         RuntimeError: If unmount fails
     """
-    result = subprocess.run(
-        ['udisksctl', 'unmount', '--mount-point', str(mount_point)],
-        capture_output=True,
-        text=True
+    errors = []
+
+    source = subprocess.run(
+        ['findmnt', '-n', '-o', 'SOURCE', '--target', str(mount_point)],
+        capture_output=True, text=True, check=False,
     )
-    if result.returncode == 0:
-        return
+    device = source.stdout.strip() if source.returncode == 0 else ""
+    if device.startswith('/dev/'):
+        result = subprocess.run(
+            ['udisksctl', 'unmount', '--block-device', device],
+            capture_output=True,
+            text=True
+        )
+        if result.returncode == 0:
+            return
+        errors.append(f"udisksctl: {(result.stderr or result.stdout).strip()}")
+    else:
+        errors.append(f"could not find the device mounted at {mount_point}")
 
     # Fallback: direct umount (requires root)
     result = subprocess.run(
@@ -271,7 +285,8 @@ def unmount_device(mount_point: Path) -> None:
         text=True
     )
     if result.returncode != 0:
-        raise RuntimeError(f"Failed to unmount {mount_point}: {result.stderr}")
+        errors.append(f"umount: {result.stderr.strip()}")
+        raise RuntimeError(f"Failed to unmount {mount_point}: {'; '.join(errors)}")
 
 
 def format_duration(seconds: float) -> str:

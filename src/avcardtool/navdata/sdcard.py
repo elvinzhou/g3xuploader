@@ -362,34 +362,12 @@ class SDCardDetector:
     
     def unmount_card(self, mount_point: str):
         """Unmount an SD card, preferring udisksctl (no root required) over umount."""
-        # Try udisksctl first — works as a regular user
-        result = subprocess.run(
-            ['udisksctl', 'unmount', '--mount-point', mount_point],
-            capture_output=True,
-            text=True,
-            timeout=30
-        )
-        if result.returncode == 0:
-            logger.info(f"Unmounted {mount_point}")
-            return
-
-        # Fallback: direct umount (requires root)
+        from avcardtool.core.utils import unmount_device
         try:
-            subprocess.run(
-                ['umount', mount_point],
-                check=True,
-                capture_output=True,
-                timeout=30
-            )
+            unmount_device(Path(mount_point))
             logger.info(f"Unmounted {mount_point}")
-
-            try:
-                os.rmdir(mount_point)
-            except OSError:
-                pass
-
-        except subprocess.CalledProcessError as e:
-            logger.warning(f"Failed to unmount {mount_point}: {e.stderr.decode()}")
+        except RuntimeError as e:
+            logger.warning(str(e))
 
 
 class G3XDatabaseWriter:
