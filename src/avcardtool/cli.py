@@ -4049,8 +4049,15 @@ def notify_test(ctx):
     help='Install a specific version (e.g. 1.2.0), even if it is not newer. '
          'Defaults to the latest release, installed only if newer than this one.'
 )
+@click.option(
+    '--system-files-only',
+    is_flag=True,
+    hidden=True,
+    help='Internal: skip the pip upgrade and only refresh udev/systemd files. '
+         'Used so the files are updated by the newly installed code.'
+)
 @click.pass_context
-def self_update(ctx, version: Optional[str]):
+def self_update(ctx, version: Optional[str], system_files_only: bool):
     """
     Update avcardtool to the latest release from GitHub, if it is newer.
 
@@ -4091,6 +4098,12 @@ def self_update(ctx, version: Optional[str]):
         os.execvp('sudo', args)
         # execvp replaces the current process; this line is unreachable
 
+    if system_files_only:
+        # Re-launched by the upgrade below so this process runs the new code.
+        click.echo(f"Updating system files with v{__version__}...")
+        _update_system_files(ctx, version)
+        return
+
     click.echo(f"Current version: v{__version__}")
 
     if dev_path:
@@ -4122,7 +4135,18 @@ def self_update(ctx, version: Optional[str]):
     new_version = installed_match.group(1) if installed_match else version
     click.echo(f"Installed v{new_version}.")
 
-    _update_system_files(ctx, new_version)
+    # pip replaced the package on disk, but this process still runs the old
+    # code, so any change to how system files are updated (timers, paths, new
+    # units) would only take effect on the next run. Re-launch the freshly
+    # installed binary for that step instead.
+    sys.stdout.flush()
+    try:
+        os.execv(sys.argv[0], [sys.argv[0], *sys.argv[1:],
+                               '--system-files-only', '--version', new_version])
+    except OSError as e:
+        click.echo(f"  Could not re-launch the new version ({e}); "
+                   f"updating system files with v{__version__}.", err=True)
+        _update_system_files(ctx, new_version)
 
 
 _RELEASES_LATEST_URL = "https://api.github.com/repos/elvinzhou/g3xuploader/releases/latest"

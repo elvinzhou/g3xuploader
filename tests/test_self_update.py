@@ -27,7 +27,8 @@ def env(monkeypatch):
     monkeypatch.setattr(cli_mod, "__version__", "1.9.3")
     monkeypatch.setattr(cli_mod.os, "geteuid", lambda: 0)
     monkeypatch.setattr(cli_mod, "_editable_install_path", lambda: None)
-    calls = SimpleNamespace(pip=[], sudo=None, system_files=[])
+    calls = SimpleNamespace(pip=[], sudo=None, system_files=[], relaunch=None)
+    monkeypatch.setattr(cli_mod.sys, "argv", ["/usr/local/bin/avcardtool", "self-update"])
 
     def fake_run(cmd, **kwargs):
         calls.pip.append(cmd)
@@ -42,6 +43,12 @@ def env(monkeypatch):
         raise SystemExit(0)  # execvp never returns
 
     monkeypatch.setattr(cli_mod.os, "execvp", fake_exec)
+
+    def fake_execv(prog, args):
+        calls.relaunch = (prog, args)
+        raise SystemExit(0)  # execv never returns
+
+    monkeypatch.setattr(cli_mod.os, "execv", fake_execv)
     return calls
 
 
@@ -66,7 +73,12 @@ def test_updates_to_newer_release_tag(env):
     assert result.exit_code == 0, result.output
     assert "New release available: v1.9.4" in result.output
     assert env.pip[0][-1] == "git+https://github.com/elvinzhou/g3xuploader.git@v1.9.4"
-    assert env.system_files == ["1.9.4"]
+    # System files are refreshed by the NEW code: the new binary is re-launched
+    assert env.system_files == []
+    assert env.relaunch == (
+        "/usr/local/bin/avcardtool",
+        ["/usr/local/bin/avcardtool", "self-update", "--system-files-only", "--version", "1.9.4"],
+    )
 
 
 def test_versions_compare_numerically(env):
@@ -113,7 +125,7 @@ def test_explicit_version_installs_even_if_older(env):
         result = run("--version", "1.8.5")
     assert result.exit_code == 0, result.output
     assert env.pip[0][-1].endswith("@v1.8.5")
-    assert env.system_files == ["1.8.5"]
+    assert env.relaunch[1][-3:] == ["--system-files-only", "--version", "1.8.5"]
 
 
 def test_dev_install_skips_release_check(env, monkeypatch):
@@ -123,3 +135,22 @@ def test_dev_install_skips_release_check(env, monkeypatch):
     assert result.exit_code == 0, result.output
     assert "Development install" in result.output
     assert env.pip == [] and env.system_files == [None]
+
+
+def test_system_files_only_skips_pip_and_uses_running_code(env):
+    result = run("--system-files-only", "--version", "1.9.4")
+    assert result.exit_code == 0, result.output
+    assert env.pip == [] and env.relaunch is None
+    assert env.system_files == ["1.9.4"]
+
+
+def test_falls_back_in_process_if_relaunch_fails(env, monkeypatch):
+    def broken_execv(prog, args):
+        raise OSError("exec format error")
+
+    monkeypatch.setattr(cli_mod.os, "execv", broken_execv)
+    with mock.patch("requests.get", return_value=_release("v1.9.4")):
+        result = run()
+    assert result.exit_code == 0, result.output
+    assert "Could not re-launch" in result.output
+    assert env.system_files == ["1.9.4"]
