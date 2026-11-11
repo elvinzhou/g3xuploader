@@ -1236,6 +1236,11 @@ def navdata_download(ctx, aircraft: int, device: Optional[int], series: Optional
             if not all_files:
                 click.echo("    No files found for this issue.")
                 continue
+            mismatched = _taw_header_mismatches(api, all_files, device_type_map.get(dev.name))
+            if mismatched:
+                click.echo("    " + _unsupported_install_message(
+                    f"{avdb.name} {target.name}", dev.name, mismatched), err=True)
+                continue
 
             unlock_codes = []
             try:
@@ -1694,6 +1699,32 @@ def _build_device_type_map(api, devices: list) -> tuple:
         except Exception as e:
             click.echo(f"Warning: /device-models/ lookup failed ({e}) — falling back to frequency heuristic")
     return device_type_map, primary_db_type
+
+
+def _taw_header_mismatches(api, files: list, target_db_type: Optional[int]) -> list:
+    """
+    TAW files whose header avionics type differs from the card's: [(file, type)].
+
+    flyGarmin serves a GTN 6XX Xi's navigation data as 'jg600a-*.taw' (header
+    type G600). Garmin's own tool installs it with signed '.sff' license files
+    (plus ldr_sys/grm_feat_key.zip) whose signature only Garmin can produce, so
+    this tool cannot install such a file correctly yet and must not write it.
+    """
+    if target_db_type is None:
+        return []
+    out = []
+    for f in files:
+        header_type = api.peek_taw_database_type(f)
+        if header_type is not None and header_type != target_db_type:
+            out.append((f, header_type))
+    return out
+
+
+def _unsupported_install_message(what: str, device: str, mismatches: list) -> str:
+    names = ", ".join(f"{f.file_name} (header type 0x{t:04X})" for f, t in mismatches)
+    return (f"{what} for {device} not installed: Garmin's file {names} is installed with "
+            f"signed .sff licenses that this tool can't create yet. Update this card with "
+            f"Garmin's GADM.")
 
 
 def _system_id_for_card(manifest: dict, entries: list) -> int:
@@ -2618,6 +2649,16 @@ def navdata_auto_update(ctx, device: Optional[Path]):
 
             # Garmin's list for this device's series is the device's own files.
             card_files = issue_files.main_files + issue_files.auxiliary_files
+            mismatched = _taw_header_mismatches(api, card_files, target_db_type)
+            if mismatched:
+                msg = _unsupported_install_message(
+                    f"{avdb.name} {issue.name}", target_dev.name, mismatched)
+                _log.warning(f"  {msg}")
+                if not is_upcoming:
+                    issues.append(("ERROR", msg))
+                _release_dl_slot(cache_dir, cache_key, [], {}, issue_files.removable_paths,
+                                 avdb.type_id, s.series_id, success=False)
+                continue
             if not card_files:
                 _log.info(f"  {cache_key}: nothing for this card's avionics — skipped")
                 # Not cached as done: Garmin may list the file later, and the
@@ -3350,6 +3391,13 @@ def navdata_update(ctx, device: Optional[Path], aircraft: int, yes: bool):
                     _release_dl_slot(cache_dir, dl_cache_key, [], {}, [], avdb.type_id, s.series_id, success=False)
                     continue
 
+            mismatched = _taw_header_mismatches(api, dl_files, target_db_type)
+            if mismatched:
+                click.echo("    " + _unsupported_install_message(
+                    f"{avdb.name} {issue.name}", target_dev.name, mismatched), err=True)
+                _release_dl_slot(cache_dir, dl_cache_key, [], {}, dl_removable,
+                                 avdb.type_id, s.series_id, success=False)
+                continue
             if not dl_files:
                 click.echo("    Nothing here for this card's avionics — skipped.")
                 _release_dl_slot(cache_dir, dl_cache_key, [], {}, dl_removable,

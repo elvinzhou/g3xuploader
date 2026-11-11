@@ -463,6 +463,24 @@ class FlyGarminAPI:
 
     TAW_HEADER_PEEK_BYTES = 4096
 
+    def peek_taw_database_type(self, db_file: DatabaseFile) -> Optional[int]:
+        """
+        Avionics type (TAW header database_type) of a .taw file, read from its
+        first few KiB instead of downloading the whole file. None for non-TAW
+        files or if the header can't be read.
+        """
+        if not db_file.file_name.lower().endswith(".taw"):
+            return None
+        from avcardtool.navdata.garmin.taw_parser import TAWParser
+        try:
+            data = self._range_bytes(db_file.url, 0, self.TAW_HEADER_PEEK_BYTES)
+            if not data:
+                return None
+            return TAWParser().parse_header_bytes(data).database_type
+        except Exception as e:
+            logger.debug(f"Could not read TAW header of {db_file.file_name}: {e}")
+            return None
+
     def _range_bytes(self, url: str, start: int, length: int) -> Optional[bytes]:
         """Fetch ``length`` bytes at ``start`` with an HTTP Range request.
 
