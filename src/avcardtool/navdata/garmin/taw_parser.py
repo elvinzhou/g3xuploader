@@ -130,6 +130,12 @@ TAW_REGION_PATHS: Dict[int, str] = {
 # 0x0c: fixed-size (183,808 bytes) certificate/signature block in nav files.
 SKIP_REGIONS: set = {0x0C}
 
+# Regions bigger than this are copied to the card in chunks instead of being
+# read into memory whole (a chart region is ~1 GB; the systemd unit is capped
+# at 512 MB, so loading it meant swapping or being killed).
+STREAM_REGION_THRESHOLD = 64 * 1024 * 1024
+STREAM_CHUNK_SIZE = 4 * 1024 * 1024
+
 # Files Garmin sets as hidden on the SD card (FAT hidden attribute).
 # On Linux/FAT32 these can be hidden with: fatattr +h <file>
 # The G3X reads them regardless of the attribute; hiding matches
@@ -458,6 +464,32 @@ class TAWParser:
         return regions
 
 
+    @staticmethod
+    def looks_zlib_compressed(f: BinaryIO, region: TAWRegion) -> bool:
+        """True if the region starts with a valid zlib header (i.e. may be deflated)."""
+        f.seek(region.offset)
+        head = f.read(2)
+        if len(head) < 2:
+            return False
+        cmf, flg = head
+        return (cmf & 0x0F) == 8 and ((cmf << 8) | flg) % 31 == 0
+
+    @staticmethod
+    def copy_region_raw(f: BinaryIO, region: TAWRegion, output_path: Path) -> None:
+        """Copy a stored-raw region to *output_path* in chunks (constant memory)."""
+        f.seek(region.offset)
+        remaining = region.compressed_size
+        with open(output_path, 'wb') as out:
+            while remaining > 0:
+                chunk = f.read(min(STREAM_CHUNK_SIZE, remaining))
+                if not chunk:
+                    raise TAWParseError(
+                        f"Region 0x{region.region_type:02x} is truncated: "
+                        f"{remaining:,} bytes missing"
+                    )
+                out.write(chunk)
+                remaining -= len(chunk)
+
     def extract_region(self, f: BinaryIO, region: TAWRegion) -> bytes:
         """
         Extract a single region's data.
@@ -558,13 +590,18 @@ class TAWExtractor:
 
                 # Extract and write data
                 try:
-                    data = self.parser.extract_region(f, region)
+                    if (region.compressed_size > STREAM_REGION_THRESHOLD
+                            and not self.parser.looks_zlib_compressed(f, region)):
+                        # Large, stored-raw region: stream it, constant memory
+                        self.parser.copy_region_raw(f, region, output_path)
+                    else:
+                        data = self.parser.extract_region(f, region)
 
-                    with open(output_path, 'wb') as out:
-                        out.write(data)
+                        with open(output_path, 'wb') as out:
+                            out.write(data)
 
-                    # Clear data from memory
-                    del data
+                        # Clear data from memory
+                        del data
 
                     # Set FAT hidden attribute to match what Garmin's own client
                     # produces. Uses fatattr on Linux if available; silent on failure.
