@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import struct
+import zlib
 from enum import Enum
 from io import BytesIO
 from pathlib import Path
@@ -72,12 +73,25 @@ def _make_table(polynomial: int, length: int) -> list[int]:
 _LOOKUP = [x ^ y for x in _make_table(_FEAT_UNLK_P1, 64) for y in _make_table(_FEAT_UNLK_P2, 4)]
 
 
-def feat_unlk_checksum(data: bytes, value: int = 0xFFFFFFFF) -> int:
-    """CRC-32 variant used in feat_unlk.dat blocks."""
+def _feat_unlk_checksum_reference(data: bytes, value: int = 0xFFFFFFFF) -> int:
+    """Byte-at-a-time reference implementation (slow; kept for tests)."""
     for b in data:
         index = b ^ (value & 0xFF)
         value = _LOOKUP[index] ^ (value >> 8)
     return value
+
+
+def feat_unlk_checksum(data: bytes, value: int = 0xFFFFFFFF) -> int:
+    """
+    CRC-32 variant used in feat_unlk.dat blocks.
+
+    The lookup table is the standard reflected CRC-32 table, and this returns
+    the raw register (no final inversion). zlib.crc32 inverts its input and
+    output, so undo both: the result is identical to the byte loop above but
+    runs in C. Verifying a multi-GB database (terrain, charts) in pure Python
+    took minutes to hours on a Raspberry Pi.
+    """
+    return (~zlib.crc32(data, (~value) & 0xFFFFFFFF)) & 0xFFFFFFFF
 
 
 # ---------------------------------------------------------------------------

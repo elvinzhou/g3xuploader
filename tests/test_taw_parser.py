@@ -291,3 +291,72 @@ class TestFatattr:
 
         assert len(calls) == 2
         assert sum(r.levelname == "WARNING" for r in caplog.records) == 2
+
+
+# ---------------------------------------------------------------------------
+# Large regions stream to the card; feat_unlk CRC matches the reference
+# ---------------------------------------------------------------------------
+
+import os  # noqa: E402
+from unittest import mock  # noqa: E402
+import zlib as _zlib  # noqa: E402
+
+from avcardtool.navdata.garmin import taw_parser as _taw_mod  # noqa: E402
+from avcardtool.navdata.garmin.taw_parser import TAWExtractor  # noqa: E402
+
+
+def test_large_raw_region_is_streamed_not_loaded(tmp_path, monkeypatch):
+    payload = os.urandom(300_000)
+    taw = tmp_path / "x.taw"
+    taw.write_bytes(build_taw(regions=[(0x22, payload)]))   # terrain_9as.tdb
+
+    monkeypatch.setattr(_taw_mod, "STREAM_REGION_THRESHOLD", 1000)
+    monkeypatch.setattr(_taw_mod, "STREAM_CHUNK_SIZE", 4096)
+    ex = TAWExtractor()
+    with mock.patch.object(ex.parser, "extract_region",
+                           side_effect=AssertionError("whole region loaded")):
+        out = tmp_path / "card"
+        ex.extract_to_directory(taw, out)
+
+    assert (out / "terrain_9as.tdb").read_bytes() == payload
+
+
+def test_large_zlib_region_still_decompressed(tmp_path, monkeypatch):
+    original = b"chart data " * 50_000
+    taw = tmp_path / "x.taw"
+    taw.write_bytes(build_taw(regions=[(0x22, _zlib.compress(original))]))
+
+    monkeypatch.setattr(_taw_mod, "STREAM_REGION_THRESHOLD", 1000)
+    out = tmp_path / "card"
+    TAWExtractor().extract_to_directory(taw, out)
+
+    assert (out / "terrain_9as.tdb").read_bytes() == original
+
+
+def test_truncated_streamed_region_is_an_error(tmp_path, monkeypatch):
+    raw = build_taw(regions=[(0x22, os.urandom(100_000))])
+    taw = tmp_path / "x.taw"
+    taw.write_bytes(raw[:-60_000])  # cut mid-region (stop marker lost too)
+
+    monkeypatch.setattr(_taw_mod, "STREAM_REGION_THRESHOLD", 1000)
+    out = tmp_path / "card"
+    ex = TAWExtractor()
+    ex.extract_to_directory(taw, out)   # logs the error; must not write a bogus full file
+    assert not (out / "terrain_9as.tdb").exists() or \
+        (out / "terrain_9as.tdb").stat().st_size < 100_000
+
+
+def test_feat_unlk_checksum_matches_reference_implementation():
+    from avcardtool.navdata.garmin.feat_unlk import (
+        _feat_unlk_checksum_reference, feat_unlk_checksum,
+    )
+    for n in (0, 1, 85, 913, 32768, 250_000):
+        data = os.urandom(n)
+        for init in (0xFFFFFFFF, 0, 0x12345678):
+            assert feat_unlk_checksum(data, init) == _feat_unlk_checksum_reference(data, init)
+    # chunked use (as in the file verifier) equals one pass
+    data = os.urandom(100_000)
+    chk = 0xFFFFFFFF
+    for i in range(0, len(data), 32768):
+        chk = feat_unlk_checksum(data[i:i + 32768], chk)
+    assert chk == feat_unlk_checksum(data)
