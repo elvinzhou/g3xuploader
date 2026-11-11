@@ -499,6 +499,82 @@ class FlyGarminAPI:
             logger.debug(f"Could not read TAW header of {db_file.file_name}: {e}")
             return None
 
+    def _range_bytes(self, url: str, start: int, length: int) -> Optional[bytes]:
+        """Fetch ``length`` bytes at ``start`` with an HTTP Range request.
+
+        Returns None unless the server honours the range (206) — a server that
+        ignores it would send the whole file, which this must never read.
+        """
+        resp = self._session.get(
+            url,
+            headers={"Range": f"bytes={start}-{start + length - 1}"},
+            stream=True,
+            timeout=30,
+        )
+        try:
+            if resp.status_code != 206:
+                return None
+            data = b""
+            for chunk in resp.iter_content(chunk_size=length):
+                data += chunk
+                if len(data) >= length:
+                    break
+            return data[:length]
+        finally:
+            resp.close()
+
+    def peek_taw_feature_crcs(self, db_file: DatabaseFile) -> dict:
+        """
+        Database-file CRCs of a .taw, read with a few tiny Range requests
+        instead of downloading it.
+
+        Each region ends with the Garmin CRC-32 of its database file — the same
+        value the card's feat_unlk.dat stores — so a caller can tell the card
+        already has this exact version before fetching gigabytes. Returns
+        {Feature.name: crc}; {} for non-TAW files or if anything can't be read
+        (callers then download as usual).
+        """
+        if not db_file.file_name.lower().endswith(".taw"):
+            return {}
+        import io
+        import struct
+        from avcardtool.navdata.garmin.feat_unlk import FILENAME_TO_FEATURE
+        from avcardtool.navdata.garmin.taw_parser import TAWParser, TAW_REGION_PATHS
+
+        try:
+            head = self._range_bytes(db_file.url, 0, self.TAW_HEADER_PEEK_BYTES)
+            if not head:
+                return {}
+            f = io.BytesIO(head)
+            TAWParser()._parse_header(f)
+            pos = f.tell()
+
+            crcs: dict = {}
+            for _ in range(64):  # regions are few; bound the walk anyway
+                section = self._range_bytes(db_file.url, pos, 15)
+                if not section or len(section) < 5:
+                    break
+                if section[4:5] == b"S":
+                    break
+                if section[4:5] != b"R" or len(section) < 15:
+                    return {}
+                region_id = struct.unpack("<H", section[5:7])[0]
+                data_size = struct.unpack("<I", section[11:15])[0]
+                data_start = pos + 15
+                feature = FILENAME_TO_FEATURE.get(TAW_REGION_PATHS.get(region_id))
+                if feature and data_size >= 4:
+                    tail = self._range_bytes(db_file.url, data_start + data_size - 4, 4)
+                    if not tail or len(tail) != 4:
+                        return {}
+                    crc = int.from_bytes(tail, "little")
+                    if crc:
+                        crcs[feature.name] = crc
+                pos = data_start + data_size
+            return crcs
+        except Exception as e:
+            logger.debug(f"Could not read CRCs of {db_file.file_name}: {e}")
+            return {}
+
     def download_file(
         self,
         db_file: DatabaseFile,

@@ -2638,6 +2638,28 @@ def navdata_auto_update(ctx, device: Optional[Path]):
                                  avdb.type_id, s.series_id, success=True)
                 continue
 
+            # Cheap pre-check, before unlocking or downloading anything: if every
+            # TAW's database CRC (read with tiny Range requests) already matches
+            # what the card's feat_unlk.dat records, the card has this exact
+            # version, e.g. Terrain installed by Garmin's own tool, which leaves
+            # no .navdata_cycles.json entry. Don't fetch gigabytes for it.
+            if feat_unlk_crcs and all(
+                f.file_name.lower().endswith(".taw") for f in card_files
+            ):
+                remote_crcs = [api.peek_taw_feature_crcs(f) for f in card_files]
+                if all(
+                    r and all(feat_unlk_crcs.get(k) == v for k, v in r.items())
+                    for r in remote_crcs
+                ):
+                    _log.info(
+                        f"  {avdb.name}/{issue.name}: card's feat_unlk CRCs already "
+                        f"match — already installed, skipping download"
+                    )
+                    # Not marked complete: another card may still need these files.
+                    _release_dl_slot(cache_dir, cache_key, [], {}, [],
+                                     avdb.type_id, s.series_id, success=False)
+                    continue
+
             try:
                 api.unlock(s.series_id, issue.name, target_dev.device_id)
             except Exception as e:
