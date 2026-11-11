@@ -454,3 +454,42 @@ def test_systemd_exec_commands_are_registered(words):
     command isn't registered (as happened when its decorator was dropped)."""
     result = CliRunner().invoke(cli, [*words, "--help"])
     assert result.exit_code == 0, result.output
+
+
+# ---------------------------------------------------------------------------
+# self-update run as root must honour the real user's config
+# ---------------------------------------------------------------------------
+
+def test_self_update_uses_real_users_config_for_timers(tmp_path, monkeypatch):
+    """As root, Config() searches root's home; the navdata timer must still be
+    enabled when the invoking user's config says auto_update_navdata=true."""
+    import click
+    from avcardtool import cli as cli_mod
+
+    root_home = tmp_path / "root"
+    user_home = tmp_path / "pilot"
+    (user_home / ".config" / "avcardtool").mkdir(parents=True)
+    root_home.mkdir()
+    (user_home / ".config" / "avcardtool" / "config.json").write_text(json.dumps({
+        "system": {"auto_update_navdata": True, "auto_self_update": True},
+    }))
+
+    monkeypatch.setenv("SUDO_USER", "pilot")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: root_home))
+    monkeypatch.setattr("pwd.getpwnam", lambda name: SimpleNamespace(pw_dir=str(user_home)))
+
+    ctx = click.Context(click.Command("x"), obj={"config": Config(config_path=None)})
+    assert ctx.obj["config"].system.auto_update_navdata is False  # root's defaults
+
+    calls = []
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda cmd, **kw: calls.append(cmd) or SimpleNamespace(stdout="", returncode=0),
+    )
+    # No network / no writes to /lib or /etc
+    monkeypatch.setattr("requests.get", mock.Mock(side_effect=RuntimeError("offline")))
+
+    cli_mod._update_system_files(ctx, None)
+
+    assert ["systemctl", "enable", "--now", "avcardtool-navdata-check.timer"] in calls
+    assert ["systemctl", "disable", "--now", "avcardtool-navdata-check.timer"] not in calls
