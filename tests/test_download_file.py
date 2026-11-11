@@ -236,3 +236,56 @@ def test_cache_key_is_per_avionics():
     assert _dl_cache_key(2260, "26B6", G3X) == "2260/26B6@06BF"
     assert _dl_cache_key(2260, "26B6", G600) != _dl_cache_key(2260, "26B6", G3X)
     assert _dl_cache_key(2260, "26B6", None) == "2260/26B6"
+
+
+# --- Reading a TAW's database CRCs without downloading it ---------------------
+
+class RangeServer:
+    """Fake avdb server that honours Range and records what was asked for."""
+
+    def __init__(self, body, honour_range=True):
+        self.body, self.honour_range, self.ranges = body, honour_range, []
+
+    def get(self, url, headers=None, stream=False, timeout=None):
+        start, end = (int(x) for x in headers["Range"].split("=")[1].split("-"))
+        self.ranges.append((start, end))
+        if not self.honour_range:
+            return FakeResponse(self.body)  # status 200: ignores Range
+        return FakeResponse(self.body[start:end + 1], status_code=206)
+
+
+def _crc_api(server):
+    api = FlyGarminAPI(mock.Mock())
+    api._session = mock.Mock()
+    api._session.get.side_effect = server.get
+    return api
+
+
+def test_peek_feature_crcs_reads_region_tails_only():
+    terrain_crc = 0x3DA470A3
+    taw = build_taw(db_type=0x0402, regions=[
+        (0x22, b"t" * 1_000_000 + terrain_crc.to_bytes(4, "little")),  # terrain_9as.tdb
+    ])
+    server = RangeServer(taw)
+    crcs = _crc_api(server).peek_taw_feature_crcs(_taw_file("tgtn-amrn-20T1.taw"))
+
+    assert crcs == {"TERRAIN": terrain_crc}
+    # Header + one section header + the 4-byte CRC: never the 1 MB of data
+    assert max(end - start + 1 for start, end in server.ranges) <= 4096
+    assert sum(end - start + 1 for start, end in server.ranges) < 5000
+
+
+def test_peek_feature_crcs_ignores_server_that_ignores_range():
+    taw = build_taw(regions=[(0x22, b"t" * 100 + b"\x01\x02\x03\x04")])
+    server = RangeServer(taw, honour_range=False)
+    assert _crc_api(server).peek_taw_feature_crcs(_taw_file("x.taw")) == {}
+
+
+def test_peek_feature_crcs_non_taw_and_errors():
+    api = FlyGarminAPI(mock.Mock())
+    api._session = mock.Mock()
+    assert api.peek_taw_feature_crcs(_taw_file("SECT_N36W078.jnx")) == {}
+    api._session.get.assert_not_called()
+
+    api._session.get.side_effect = ConnectionError("boom")
+    assert api.peek_taw_feature_crcs(_taw_file("x.taw")) == {}
