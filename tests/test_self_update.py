@@ -112,12 +112,18 @@ def test_non_root_up_to_date_never_asks_for_sudo(env, monkeypatch):
     assert env.sudo is None
 
 
-def test_non_root_newer_reruns_with_sudo_pinned(env, monkeypatch):
+def test_non_root_newer_reruns_with_plain_sudo_self_update(env, monkeypatch):
+    """No extra arguments: the sudoers rule matches them exactly."""
     monkeypatch.setattr(cli_mod.os, "geteuid", lambda: 1000)
     with mock.patch("requests.get", return_value=_release("v1.9.4")):
         run()
-    assert env.sudo[0] == "sudo"
-    assert env.sudo[-3:] == ["self-update", "--version", "1.9.4"]
+    assert env.sudo == ["sudo", "/usr/local/bin/avcardtool", "self-update"]
+
+
+def test_non_root_explicit_version_is_passed_through(env, monkeypatch):
+    monkeypatch.setattr(cli_mod.os, "geteuid", lambda: 1000)
+    run("--version", "1.8.5")
+    assert env.sudo == ["sudo", "/usr/local/bin/avcardtool", "self-update", "--version", "1.8.5"]
 
 
 def test_explicit_version_installs_even_if_older(env):
@@ -154,3 +160,19 @@ def test_falls_back_in_process_if_relaunch_fails(env, monkeypatch):
     assert result.exit_code == 0, result.output
     assert "Could not re-launch" in result.output
     assert env.system_files == ["1.9.4"]
+
+
+def test_sudoers_allows_the_sudo_rerun_without_a_password(env, monkeypatch):
+    """sudoers matches arguments exactly: the re-run must match the rule."""
+    import fnmatch
+    from pathlib import Path
+
+    monkeypatch.setattr(cli_mod.os, "geteuid", lambda: 1000)
+    with mock.patch("requests.get", return_value=_release("v1.9.4")):
+        run()
+    command = " ".join(env.sudo[1:])           # what sudo is asked to run
+
+    sudoers = Path(__file__).parent.parent / "systemd" / "avcardtool-sudoers"
+    rule = next(l for l in sudoers.read_text().splitlines() if "NOPASSWD:" in l)
+    allowed = [c.strip() for c in rule.split("NOPASSWD:", 1)[1].split(",")]
+    assert any(fnmatch.fnmatchcase(command, pattern) for pattern in allowed), (command, allowed)
