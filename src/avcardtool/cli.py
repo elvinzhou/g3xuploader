@@ -4102,6 +4102,20 @@ def _update_system_files(ctx: click.Context, version: Optional[str]) -> None:
     except KeyError:
         real_home = Path.home()
 
+    # Running as root (sudo or the self-update unit), Config() looked in root's
+    # home, not the real user's. Root's defaults would then disable the
+    # navdata/self-update timers and write the wrong paths into the unit files.
+    # Use the real user's config when root's own search found nothing of its own.
+    user_cfg_path = real_home / ".config" / "avcardtool" / "config.json"
+    if (cfg is not None and user_cfg_path.exists()
+            and real_home != Path.home()
+            and (cfg.config_path is None
+                 or cfg.config_path.is_relative_to(Path.home()))):
+        try:
+            cfg = Config(config_path=user_cfg_path)
+        except Exception as e:
+            click.echo(f"Warning: could not load {user_cfg_path}: {e}", err=True)
+
     data_dir = cfg.system.data_dir if cfg else str(real_home / ".local" / "share" / "avcardtool")
     config_dir = (
         str(cfg.config_path.parent)
