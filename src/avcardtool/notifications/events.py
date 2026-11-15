@@ -282,3 +282,105 @@ def build_processing_error_event(message: str) -> NotificationEvent:
         body=message,
         data={"message": message},
     )
+
+
+def build_firmware_available_event(
+    product_name: str,
+    version: str,
+    release_date: str,
+    notes: List[str],
+    page_url: str,
+    cache_path: str,
+    bulletin_path: Optional[str] = None,
+    auto_install: bool = True,
+    max_notes: int = 15,
+) -> NotificationEvent:
+    """Announce a new avionics software version that is now in the local cache."""
+    title = f"{product_name} software {version} available"
+    lines = [f"Garmin has published {product_name} software version {version}"
+             + (f" (as of {release_date})." if release_date else "."), ""]
+    if notes:
+        lines.append("Notes from Garmin:")
+        for n in notes[:max_notes]:
+            lines.append(f"  - {n}")
+        if len(notes) > max_notes:
+            lines.append(f"  ... and {len(notes) - max_notes} more on the page below")
+        lines.append("")
+    lines.append(f"Page: {page_url}")
+    lines.append(f"Downloaded to: {cache_path}")
+    if bulletin_path:
+        lines.append(f"Service bulletin: {bulletin_path}")
+        lines.append("Garmin's public bulletin is addressed to non-certified aircraft; check that it applies to yours.")
+    lines.append("")
+    if auto_install:
+        lines.append("Cards that qualify are updated automatically when inserted; you will be told when one is written.")
+    else:
+        lines.append("Automatic card installs are off (firmware.auto_install); use 'avcardtool firmware install'.")
+
+    return NotificationEvent(
+        event_type="firmware_available",
+        severity=Severity.INFO,
+        title=title,
+        body="\n".join(lines),
+        data={
+            "product": product_name,
+            "version": version,
+            "release_date": release_date,
+            "page_url": page_url,
+            "cache_path": cache_path,
+            "bulletin_path": bulletin_path,
+        },
+    )
+
+
+def build_firmware_card_written_event(
+    product_name: str,
+    version: str,
+    card: str,
+    file_count: int,
+    next_steps: List[str],
+    installed_version: Optional[str] = None,
+) -> NotificationEvent:
+    """Announce that firmware was written to one card. ``card`` is its mount point / volume id."""
+    title = f"{product_name} software {version} written to card"
+    lines = [f"{product_name} software {version} was written to card {card} ({file_count} file(s), verified)."]
+    if installed_version:
+        lines.append(f"Previously on the card/display: {installed_version}")
+    lines += ["", "Next:"]
+    lines += [f"  - {step}" for step in next_steps]
+
+    return NotificationEvent(
+        event_type="firmware_card_written",
+        severity=Severity.INFO,
+        title=title,
+        body="\n".join(lines),
+        data={
+            "product": product_name,
+            "version": version,
+            "card": card,
+            "file_count": file_count,
+            "installed_version": installed_version,
+        },
+    )
+
+
+def build_firmware_update_failed_event(issues: List[Any]) -> NotificationEvent:
+    """Summarize a firmware run that hit errors ((severity, message) pairs, like navdata)."""
+    error_msgs = [msg for sev, msg in issues if sev == "ERROR"]
+    warning_msgs = [msg for sev, msg in issues if sev != "ERROR"]
+
+    title = f"Firmware update failed ({len(error_msgs)} error{'s' if len(error_msgs) != 1 else ''})"
+    lines = ["The automatic avionics firmware update did not complete:", ""]
+    for msg in error_msgs:
+        lines.append(f"  ERROR: {msg}")
+    for msg in warning_msgs:
+        lines.append(f"  WARNING: {msg}")
+    lines += ["", "Details: journalctl -u 'avcardtool-navdata*' -n 200"]
+
+    return NotificationEvent(
+        event_type="firmware_update_failed",
+        severity=Severity.ERROR,
+        title=title,
+        body="\n".join(lines),
+        data={"errors": error_msgs, "warnings": warning_msgs},
+    )

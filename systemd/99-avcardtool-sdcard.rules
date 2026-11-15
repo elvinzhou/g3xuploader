@@ -2,11 +2,12 @@
 #
 # When a FAT32-formatted SD card is inserted, two systemd services fire:
 #   avcardtool-processor@<dev>       — flight log analysis and upload (one-shot)
-#   avcardtool-navdata@<dev>         — navigation database update on insert (one-shot)
+#   avcardtool-navdata@<dev>         — navigation database update on insert (one-shot);
+#                                      also runs the avionics firmware step for the card
 #
 # Cards that stay inserted are kept current by the system-wide
 # avcardtool-navdata-check.timer (daily at ~03:00, Persistent=true), which
-# runs 'avcardtool navdata auto-update' across all mounted cards — no
+# runs 'avcardtool navdata auto-update' (navdata, then firmware) across all cards — no
 # per-device unit is needed for the periodic re-check.
 #
 # Installation:

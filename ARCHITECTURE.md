@@ -29,6 +29,7 @@ avcardtool/
 │   │   ├── manager.py         # fan-out, retry, rate limiting; never raises
 │   │   ├── events.py          # pipeline results → NotificationEvent
 │   │   └── backends/          # email (SMTP); registry is pluggable
+│   ├── firmware/              # Avionics software: catalog, packages, cards, auto
 │   └── navdata/
 │       └── garmin/
 │           ├── auth.py        # SSO + OAuth login flow
@@ -422,6 +423,45 @@ Still hard-coded (see the TODO list in `GTN_NAVDATA_NOTES.md`): the slot layout 
 feature bits above (`feat_unlk.Feature`), the default region paths, and the file
 attributes. A new database type therefore installs with a warning until its slot is
 added, and it should be checked against a GADM-written card first.
+
+## Firmware Updates
+
+`avcardtool/firmware/` handles avionics *software* (not databases). `registry.py` lists the
+products (`g3x_touch`, `gtn_xi`: Garmin page URL, package kind, how to read the installed version);
+nothing else is per device.
+
+- `catalog.py` parses Garmin's public `download_details.jsp?id=...` pages (version in the
+  `software version N` heading, date, the one `.zip` link, release notes). Only https links on
+  `garmin.com` are accepted. The page ids are stable: Garmin edits the same page for a new version.
+- `packages.py` downloads (HEAD, `.part`, rename), validates the zip and builds
+  `<data_dir>/firmware/<product>/<version>/image/` (exactly the tree for the card root) plus
+  `package.json` (files, sizes, sha256; written last, so it marks a complete package).
+- `cards.py` decides per card and writes with fsync and sha256 read-back; `auto.py` is the
+  unattended run, called by `navdata auto-update` after the navdata work (`_run_firmware_step`
+  in `cli.py`, on every exit path, never raising). `state.json` makes "new version" notify once.
+
+Two package kinds:
+
+| Kind | Package | Card result |
+|------|---------|-------------|
+| `gcd_folder` (G3X Touch) | zip with `Garmin/*.GCD` + `Instructions.txt`; unsigned, no per-unit data | `Garmin/*` copied into `<card>/Garmin/`; the display asks the pilot to confirm on power-up. The installed version is the `software_version` in the first line of the newest `data_log/*.csv` |
+| `copy2card` (GTN Xi) | zip with a 7-Zip self-extractor `.exe` plus the service bulletin PDF | the extracted tree replaces the card root |
+
+**Copy2Card finding.** Garmin's GTN installer is Copy2Card: a PE stub, a `;!@Install@!UTF-8!` config
+(`RunProgram="Copy2Card.exe"`), then a 7z archive. The archive holds `Copy2Card.exe`,
+`updateinfo.xml` (`<RootDirPath>Root</RootDirPath>`, `<EraseDestination>true</EraseDestination>`;
+the case differs from the real `root` directory) and the `root/` tree. Copy2Card erases the card and
+copies that tree to its root; nothing is signed per unit. We do the same without running the exe:
+find the 7z signature, extract (py7zr, or a system 7-Zip), read `updateinfo.xml`, take the
+`RootDirPath` tree (matched case-insensitively) as `image/`. Erasing is done by deleting files, and
+`ldr_part_nmbr.txt` is written last so a half-written card never looks like a loader card.
+
+Safety: Garmin's service bulletin says powering a GTN with a loader card in and not loading can
+corrupt its configuration, and the loader card is separate from the database card. So the automatic
+path only refreshes a card that already has `ldr_part_nmbr.txt` naming `GTN Xi` and none of the
+database-card markers (`feat_unlk.dat`, `.gadm.meta`, `ldr_sys/avtn_db.bin`, `data_log/`, ...);
+creating a loader card is only done by `firmware install gtn_xi` (needs `--erase` on a non-loader,
+non-empty card).
 
 ## Authentication Details
 

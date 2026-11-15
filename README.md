@@ -125,6 +125,66 @@ that card's device:
 The card's avionics comes from `avionics.txt` in the card root (the device name as flyGarmin lists
 it), else from the existing `feat_unlk.dat`. Install never touches `Garmin/GarminDevice.xml`.
 
+### Firmware Updates
+
+> **Enable automatic firmware checks and card updates?** *(default: Yes)*
+
+avcardtool also keeps avionics *software* current for **G3X Touch (GDU 4xx)** and **GTN 6XX/7XX Xi**.
+It runs as part of `navdata auto-update` (card insert and the daily timer), after the navdata work:
+
+1. It reads Garmin's public download pages (no login) for the latest version of each product.
+2. A new version is downloaded and cached under `<data_dir>/firmware/<product>/<version>/` (newest two
+   kept) and announced once by email (`firmware_available`: version, notes, where it was cached).
+3. Cards are updated when they qualify:
+   - **G3X Touch**: the newest flight log on the card (`data_log/*.csv`) reports an older software
+     version than the package. The `Garmin/` folder of GCD files is copied into the card's `Garmin/`
+     folder (nothing else on the card is touched). **The display still asks the pilot to confirm the
+     update when powered up with the card** — repeat for each display. Once the log shows the new
+     version, the GCD files this tool copied are removed again (`remove_after_install`).
+   - **GTN Xi**: only a card that already is a GTN loader card (it has `ldr_part_nmbr.txt` naming
+     `GTN Xi`) is refreshed, by erasing it and copying Garmin's loader tree. The GTN's installed
+     version cannot be read, so the card's own part number/revision is compared.
+
+Safety rules:
+
+- A GTN loader card is a **dedicated card, never the navigation database card**. Garmin's service
+  bulletin warns that powering a GTN with a loader card inserted and not loading the software can
+  corrupt its configuration. The automatic path never writes loader files to a card that has
+  `feat_unlk.dat`, `.gadm.meta`, `ldr_sys/avtn_db.bin`, `data_log/` or similar, and never creates a
+  loader card on its own.
+- Garmin's public GTN Xi bulletin is addressed to non-certified aircraft. Follow the bulletin
+  (saved next to the cached package) for how to load the software.
+- Every file written to a card is checked by size and sha256 read-back.
+- G3X packages need nothing extra. GTN packages are 7-Zip self-extractors (never executed); unpacking
+  needs `py7zr` (`pip install 'avcardtool[firmware]'`) or a `7zip`/`p7zip-full` system package
+  (`install.sh` tries to install one).
+
+```bash
+avcardtool firmware check                 # latest versions, cache, version each G3X card last logged
+avcardtool firmware download              # fill the cache only
+avcardtool firmware install g3x_touch [DEVICE]          # copy regardless of the installed version
+avcardtool firmware install gtn_xi DEVICE               # first-time GTN loader card (asks to confirm)
+avcardtool firmware install gtn_xi DEVICE --erase       # ...on a card that is not already a loader card
+avcardtool firmware auto-update [DEVICE]  # the unattended step on its own
+avcardtool --dry-run firmware auto-update # report only; nothing downloaded or written
+```
+
+To make the first GTN loader card, put a blank, dedicated card in the reader and run
+`avcardtool firmware install gtn_xi /dev/sdX1`. `install` refuses a card that looks like a
+database/log card unless you pass `--erase`; it always asks before erasing unless `--yes`.
+
+Config (`firmware` section of `config.json`):
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `enabled` | `true` | Run the firmware step at all |
+| `auto_install` | `true` | `false` = check, download and notify only; never write cards |
+| `remove_after_install` | `true` | Delete the copied G3X GCD files once the log shows the new version |
+| `products` | `{}` | Per product (`g3x_touch`, `gtn_xi`): `{"enabled": true, "page_url": "<override>"}` |
+
+The firmware step is triggered by the same units as navdata, so it needs `auto_update_navdata`
+enabled for the timer and the insert service to be installed.
+
 ### Email Notifications
 
 > **Enable email notifications?** *(default: No)*
@@ -259,6 +319,12 @@ avcardtool navdata login                  # Authenticate with flyGarmin (MFA sup
 avcardtool navdata list-databases         # List available databases
 avcardtool navdata download all           # Download subscribed databases
 avcardtool navdata install DB.taw         # Install to SD card
+
+# Avionics firmware (G3X Touch, GTN Xi)
+avcardtool firmware check                 # Latest published versions + what is cached
+avcardtool firmware download              # Download packages into the cache
+avcardtool firmware install PRODUCT [DEVICE]   # Write a package to a card
+avcardtool firmware auto-update [DEVICE]  # Check, cache, update qualifying cards
 
 # Configuration
 avcardtool config show                    # Print current configuration

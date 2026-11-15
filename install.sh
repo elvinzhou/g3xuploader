@@ -101,6 +101,9 @@ fi
 echo "[1/6] Installing system dependencies..."
 apt-get update -qq
 apt-get install -y python3 python3-pip python3-venv udev util-linux fatattr
+# Best effort: a 7-Zip extractor for GTN firmware packages (the other option is
+# the py7zr Python package). Package name varies by release; never fatal.
+apt-get install -y 7zip || apt-get install -y p7zip-full || true
 echo "Done"
 
 # ---------------------------------------------------------------------------
@@ -128,6 +131,8 @@ else
     sudo -u "$REAL_USER" "$VENV_DIR/bin/pip" install \
         "git+https://github.com/elvinzhou/g3xuploader.git@v${INSTALL_VERSION}" -q
 fi
+# Best effort: lets the tool unpack GTN firmware packages without a system 7-Zip.
+sudo -u "$REAL_USER" "$VENV_DIR/bin/pip" install py7zr -q || true
 
 # Symlink into system PATH (still root-owned, pointing into the user venv)
 rm -f "$SYMLINK"

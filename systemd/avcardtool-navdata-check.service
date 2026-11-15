@@ -1,5 +1,5 @@
 [Unit]
-Description=AVCardTool Daily NavData Update Check
+Description=AVCardTool Daily NavData and Firmware Update Check
 Documentation=https://github.com/elvinzhou/g3xuploader
 Wants=network-online.target
 After=network-online.target udisks2.service
@@ -9,6 +9,8 @@ Type=oneshot
 # No device argument: auto-update scans every mounted FAT32 card, so a
 # single system-wide unit covers however many cards are inserted.
 # auto-update is idempotent — if nothing changed it exits immediately.
+# It also runs the avionics firmware step (Garmin version check, package
+# cache, qualifying cards) after the navdata work.
 ExecStart=/usr/local/bin/avcardtool navdata auto-update
 StandardOutput=journal
 StandardError=journal
