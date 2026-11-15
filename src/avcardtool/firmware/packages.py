@@ -567,6 +567,15 @@ def ensure_package(release: FirmwareRelease, product: Product, data_dir,
     return pkg
 
 
+def verify_package(pkg: PreparedPackage) -> None:
+    """Re-hash every image file against package.json (before a card is wiped). Raises FirmwareError."""
+    for f in pkg.files:
+        p = pkg.image_dir / f.path
+        if not p.is_file() or p.stat().st_size != f.size or _sha256(p) != f.sha256:
+            invalidate_package(pkg)
+            raise FirmwareError(f"Cached file {f.path} is damaged (cache corrupt); it will be downloaded again")
+
+
 def invalidate_package(pkg: PreparedPackage) -> None:
     """Mark a package incomplete (e.g. its cached files no longer match their hashes)."""
     (pkg.root / "package.json").unlink(missing_ok=True)

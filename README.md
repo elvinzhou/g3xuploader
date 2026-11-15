@@ -173,6 +173,34 @@ To make the first GTN loader card, put a blank, dedicated card in the reader and
 `avcardtool firmware install gtn_xi /dev/sdX1`. `install` refuses a card that looks like a
 database/log card unless you pass `--erase`; it always asks before erasing unless `--yes`.
 
+#### GTN Xi on its own database card (one-card cycle)
+
+If you only have the GTN's database card, avcardtool can use it for the firmware too. When a new
+version is available it **wipes that card (databases included)**, writes the loader and emails you a
+link to click once the GTN has installed the software. Until you confirm, database updates for that
+card are paused; after you confirm, the loader files are removed, the card's `avionics.txt` /
+`feat_unlk.dat` / `.evidf.dat` / `.gadm.meta` are put back from a backup, and the databases are
+reinstalled on the next run. The card is never reformatted, so its volume serial survives.
+
+It only starts when a **baseline** is recorded for that card: tell it what the GTN already has
+(System Information page) with `avcardtool firmware set-installed gtn_xi 21.00`, with the card in the
+reader. Without a baseline nothing is ever wiped (otherwise the first run would wipe a card whose GTN
+is already current). `avcardtool firmware install gtn_xi DEVICE --erase` does one cycle by hand.
+
+```bash
+avcardtool firmware status                # baseline / pending / restore per card
+avcardtool firmware confirm [gtn_xi]      # same as the link: software installed
+avcardtool firmware cancel [gtn_xi]       # not installing; this version is not offered again for the card
+avcardtool firmware confirm-server        # serves the link (systemd: avcardtool-confirm.service)
+```
+
+To get a clickable link set `firmware.confirm_url` to an address your phone can reach (a Cloudflare
+tunnel hostname or `http://<pi-address>:8765`, pointing at `firmware.confirm_listen`, default
+`127.0.0.1:8765`) and run `avcardtool self-update` (or `install.sh`) to install the small server unit.
+The link holds a long random single-use token and anyone with it can confirm, so treat it as private.
+Without `confirm_url` the email gives the two commands instead. Set `database_card_cycle` to `false`
+to turn the cycle off.
+
 Config (`firmware` section of `config.json`):
 
 | Key | Default | Meaning |
@@ -181,6 +209,9 @@ Config (`firmware` section of `config.json`):
 | `auto_install` | `true` | `false` = check, download and notify only; never write cards |
 | `remove_after_install` | `true` | Delete the copied G3X GCD files once the log shows the new version |
 | `products` | `{}` | Per product (`g3x_touch`, `gtn_xi`): `{"enabled": true, "page_url": "<override>"}` |
+| `database_card_cycle` | `true` | GTN one-card cycle (above); needs a recorded baseline |
+| `confirm_url` | `""` | Public base URL of the confirmation server; empty = no link, commands in the email |
+| `confirm_listen` | `127.0.0.1:8765` | Where `firmware confirm-server` listens |
 
 The firmware step is triggered by the same units as navdata, so it needs `auto_update_navdata`
 enabled for the timer and the insert service to be installed.

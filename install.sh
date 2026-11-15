@@ -70,6 +70,7 @@ systemctl stop avcardtool-navdata-check.timer 2>/dev/null || true
 systemctl stop avcardtool-navdata-check.service 2>/dev/null || true
 systemctl stop avcardtool-self-update.timer 2>/dev/null || true
 systemctl stop avcardtool-self-update.service 2>/dev/null || true
+systemctl stop avcardtool-confirm.service 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
 # Detect existing installation and confirm upgrade
@@ -217,6 +218,15 @@ except Exception:
 ENABLE_FLIGHT_PROC=$(_cfg_bool "auto_process_flights" "no")
 ENABLE_NAVDATA=$(_cfg_bool "auto_update_navdata" "no")
 ENABLE_SELF_UPDATE=$(_cfg_bool "auto_self_update" "yes")
+# Firmware confirmation-link server: only when firmware.confirm_url is set
+ENABLE_CONFIRM=$(python3 -c "
+import json
+try:
+    d = json.load(open('${CONFIG_FILE}'))
+    print('yes' if d.get('firmware', {}).get('confirm_url') else 'no')
+except Exception:
+    print('no')
+" 2>/dev/null || echo "no")
 
 echo "Features enabled by setup:"
 echo "  Flight log processing:      $ENABLE_FLIGHT_PROC"
@@ -324,6 +334,15 @@ else
     rm -f /lib/systemd/system/avcardtool-navdata@.service
     rm -f /lib/systemd/system/avcardtool-navdata-check.service
     rm -f /lib/systemd/system/avcardtool-navdata-check.timer
+fi
+
+if [ "$ENABLE_CONFIRM" = "yes" ]; then
+    install_service "avcardtool-confirm.service"
+    systemctl enable --now avcardtool-confirm.service
+    echo "  Enabled avcardtool-confirm.service (firmware confirmation link)"
+else
+    systemctl disable --now avcardtool-confirm.service 2>/dev/null || true
+    rm -f /lib/systemd/system/avcardtool-confirm.service
 fi
 
 # The per-card navdata-watch sleep loop is replaced by the system-wide

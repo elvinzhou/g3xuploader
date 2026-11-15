@@ -294,6 +294,7 @@ def build_firmware_available_event(
     bulletin_path: Optional[str] = None,
     auto_install: bool = True,
     max_notes: int = 15,
+    baseline_hint: Optional[str] = None,
 ) -> NotificationEvent:
     """Announce a new avionics software version that is now in the local cache."""
     title = f"{product_name} software {version} available"
@@ -312,6 +313,9 @@ def build_firmware_available_event(
         lines.append(f"Service bulletin: {bulletin_path}")
         lines.append("Garmin's public bulletin is addressed to non-certified aircraft; check that it applies to yours.")
     lines.append("")
+    if baseline_hint:
+        lines.append(baseline_hint)
+        lines.append("")
     if auto_install:
         lines.append("Cards that qualify are updated automatically when inserted; you will be told when one is written.")
     else:
@@ -383,4 +387,46 @@ def build_firmware_update_failed_event(issues: List[Any]) -> NotificationEvent:
         title=title,
         body="\n".join(lines),
         data={"errors": error_msgs, "warnings": warning_msgs},
+    )
+
+
+def build_firmware_confirm_needed_event(
+    product_name: str,
+    version: str,
+    link: Optional[str],
+    confirm_command: str,
+    cancel_command: str,
+    bulletin_path: Optional[str] = None,
+    reminder: bool = False,
+) -> NotificationEvent:
+    """
+    Ask the pilot to confirm that the firmware written to the avionics' own database
+    card was installed. The card itself is deliberately not named here.
+    """
+    title = f"{product_name} software {version} is on the card — confirm when installed"
+    if reminder:
+        title = "Reminder: " + title
+    lines = [
+        f"The database card now holds only the {product_name} firmware loader (version {version}). "
+        "Its databases were removed and will be reinstalled after you confirm.",
+        "",
+        f"The {product_name} starts in configuration mode with this card inserted: follow Garmin's "
+        "service bulletin to load the software.",
+    ]
+    if bulletin_path:
+        lines.append(f"Service bulletin: {bulletin_path}")
+    lines.append("")
+    if link:
+        lines += ["When the software is installed, open this link and confirm:", f"  {link}",
+                  "(Anyone with the link can confirm; it works once.)"]
+    else:
+        lines += ["When the software is installed, run on the Raspberry Pi:", f"  {confirm_command}",
+                  "or, if you did not install it:", f"  {cancel_command}"]
+    lines += ["", "Database updates for this card are paused until you confirm or cancel."]
+    return NotificationEvent(
+        event_type="firmware_confirm_needed",
+        severity=Severity.WARNING,
+        title=title,
+        body="\n".join(lines),
+        data={"product": product_name, "version": version, "reminder": reminder},
     )

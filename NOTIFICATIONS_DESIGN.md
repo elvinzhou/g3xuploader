@@ -166,6 +166,7 @@ class NotificationBackend(ABC):
 | `firmware_available` | INFO | `firmware.auto.refresh_product()` | A new G3X Touch / GTN Xi software version was downloaded to the cache; sent once per version (`<data_dir>/firmware/state.json`), retried if delivery failed. |
 | `firmware_card_written` | INFO | `firmware.auto` per card | Firmware was written to a card (not for the cleanup of copied GCD files). Body says what the pilot must do next. |
 | `firmware_update_failed` | ERROR | `firmware.auto.run_firmware_auto_update()` end of run | Any ERROR in the firmware issues list (network-only problems are WARNINGs and ride along). |
+| `firmware_confirm_needed` | WARNING | `firmware.cycle.send_confirm_needed()` | A GTN database card was wiped and holds the loader; asks for confirmation (link or commands). Retried until delivered, repeated every 7 days while pending. |
 | `garmin_auth_expired` | ERROR | `navdata_auto_update()` auth guard | `ensure_authenticated()` returned False. Body includes the fix: `avcardtool navdata login`. Rate-limited to once per 24h via a state file (`<data_dir>/notifications/state.json`) so the daily timer doesn't nag daily forever. |
 | `processing_error` | ERROR | `auto_process()` | Unhandled per-run failure (e.g. mount error, zero uploaders configured but uploads expected). Per-file parse errors stay in the `flights_processed` body instead. |
 

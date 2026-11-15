@@ -104,11 +104,20 @@ class FirmwareConfig:
         display's own log shows the new version is running.
     products: per-product settings, keyed by product key (g3x_touch, gtn_xi):
         {"enabled": true, "page_url": "<override of the Garmin version page>"}
+    database_card_cycle: for loader-card products (GTN Xi), update the avionics'
+        own database card: wipe it, write the loader, block navdata for that card
+        until the pilot confirms. Only with a recorded baseline version.
+    confirm_url: public base URL of 'firmware confirm-server' (empty = no link;
+        notifications then give the CLI commands).
+    confirm_listen: host:port the confirm server binds to.
     """
     enabled: bool = True
     auto_install: bool = True
     remove_after_install: bool = True
     products: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    database_card_cycle: bool = True
+    confirm_url: str = ""
+    confirm_listen: str = "127.0.0.1:8765"
 
     def product_enabled(self, key: str) -> bool:
         return bool((self.products.get(key) or {}).get("enabled", True))
@@ -128,6 +137,7 @@ class NotificationsConfig:
         "firmware_available": True,
         "firmware_card_written": True,
         "firmware_update_failed": True,
+        "firmware_confirm_needed": True,
         "garmin_auth_expired": True,
         "processing_error": True,
     })
@@ -272,6 +282,9 @@ class Config:
             self.firmware.auto_install = fw.get("auto_install", True)
             self.firmware.remove_after_install = fw.get("remove_after_install", True)
             self.firmware.products = fw.get("products", {}) or {}
+            self.firmware.database_card_cycle = fw.get("database_card_cycle", True)
+            self.firmware.confirm_url = fw.get("confirm_url", "") or ""
+            self.firmware.confirm_listen = fw.get("confirm_listen", "127.0.0.1:8765") or "127.0.0.1:8765"
 
         # Load notifications config
         if "notifications" in data:
@@ -430,6 +443,13 @@ class Config:
             url = prod_cfg.get("page_url")
             if url is not None and not str(url).startswith("https://"):
                 raise ValueError(f"firmware.products.{key}.page_url must be an https URL")
+
+        fwc = getattr(self, "firmware", None) or FirmwareConfig()
+        if fwc.confirm_url and not fwc.confirm_url.startswith(("http://", "https://")):
+            raise ValueError("firmware.confirm_url must start with http:// or https://")
+        host, _, port = fwc.confirm_listen.rpartition(":")
+        if not host or not port.isdigit() or not 0 < int(port) < 65536:
+            raise ValueError("firmware.confirm_listen must look like host:port")
 
         # Validate system paths
         data_dir = Path(self.system.data_dir)

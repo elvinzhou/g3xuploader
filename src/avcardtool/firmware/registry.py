@@ -24,6 +24,15 @@ class Product:
     log_product_prefix: Optional[str] = None
     # What the pilot must do after a card was written (shown in the notification).
     next_steps: Tuple[str, ...] = ()
+    # How to recognise this product's navigation *database* card without a Garmin
+    # login (enables the one-card firmware cycle): every word must appear in the
+    # card's avionics.txt (case-insensitive), or any listed file must exist.
+    db_card_words: Tuple[str, ...] = ()
+    db_card_files: Tuple[str, ...] = ()
+
+    @property
+    def cycle_capable(self) -> bool:
+        return self.kind == KIND_COPY2CARD and bool(self.db_card_words or self.db_card_files)
 
 
 PRODUCTS: Dict[str, Product] = {
@@ -43,6 +52,8 @@ PRODUCTS: Dict[str, Product] = {
         name="GTN Xi",
         page_url="https://www8.garmin.com/support/download_details.jsp?id=15519",
         kind=KIND_COPY2CARD,
+        db_card_words=("gtn", "xi"),
+        db_card_files=("ldr_sys/nav_db2.bin",),
         next_steps=(
             "This is a GTN loader card, not the database card. Keep it separate from the navigation database card.",
             "Load the software as described in Garmin's service bulletin. Powering a GTN with a loader card "

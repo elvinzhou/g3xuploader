@@ -97,6 +97,38 @@ def database_card_signs(card: Path) -> List[str]:
     return [s for s in DATABASE_CARD_SIGNS if (card / s).exists()]
 
 
+def _avionics_text(card: Path) -> str:
+    try:
+        return (card / "avionics.txt").read_text(errors="replace").lower()
+    except OSError:
+        return ""
+
+
+def is_database_card(product: Product, card: Path) -> bool:
+    """
+    Is this ``product``'s own navigation database card (no Garmin login needed)?
+
+    avionics.txt naming the product, or one of the product's database files. A card
+    that reads as another product's (flight logs from another product, or its
+    avionics.txt) is never recognised.
+    """
+    from avcardtool.firmware.registry import PRODUCTS
+    if not product.cycle_capable:
+        return False
+    text = _avionics_text(card)
+    info = read_log_info(card)
+    for other in PRODUCTS.values():
+        if other.key == product.key:
+            continue
+        if info and other.log_product_prefix and info.product.startswith(other.log_product_prefix):
+            return False
+        if other.db_card_words and text and all(w in text for w in other.db_card_words):
+            return False
+    if text and all(w in text for w in product.db_card_words) and product.db_card_words:
+        return True
+    return any((card / f).exists() for f in product.db_card_files)
+
+
 def _card_entries(card: Path) -> List[Path]:
     try:
         return [p for p in card.iterdir() if p.name.lower() not in _JUNK_ENTRIES]
@@ -313,12 +345,23 @@ def _copy_verified(src: Path, dest: Path, f: ImageFile) -> None:
         raise
 
 
+def _force_remove(func, path, _exc):
+    # FAT files can carry the read-only attribute; clear it and retry once.
+    os.chmod(path, 0o666)
+    func(path)
+
+
 def _erase_card_root(card: Path) -> None:
+    """Delete everything at the card root. Never reformats: the volume serial must survive."""
     for entry in card.iterdir():
         if entry.is_dir() and not entry.is_symlink():
-            shutil.rmtree(entry)
+            shutil.rmtree(entry, onerror=_force_remove)
         else:
-            entry.unlink()
+            try:
+                entry.unlink()
+            except PermissionError:
+                os.chmod(entry, 0o666)
+                entry.unlink()
 
 
 def _check_space(plan: CardPlan, card: Path) -> None:

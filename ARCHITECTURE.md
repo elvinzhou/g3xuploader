@@ -463,6 +463,33 @@ database-card markers (`feat_unlk.dat`, `.gadm.meta`, `ldr_sys/avtn_db.bin`, `da
 creating a loader card is only done by `firmware install gtn_xi` (needs `--erase` on a non-loader,
 non-empty card).
 
+### One-card cycle (`cycle.py`, `confirm_server.py`)
+
+For loader-card products the avionics' own database card can be used (`firmware.database_card_cycle`).
+The product registry says how to recognise that card without a Garmin login (`avionics.txt` naming
+the product, or `ldr_sys/nav_db2.bin`; never a card with another product's logs). Per card volume
+serial, `state.json` keeps `installed_version` (the baseline: set by `firmware set-installed` or by a
+confirmation), `pending` (`version`, `token`, `backup_dir`, notification times), `restore` and
+declined versions.
+
+1. Qualifies only with a baseline lower than the release (**no baseline: never wipe**), no pending cycle, a serial.
+2. The package is re-hashed, `avionics.txt`/`feat_unlk.dat`/`.evidf.dat`/`.gadm.meta` are backed up to
+   `<data_dir>/firmware/cards/<serial>/backup/`, `pending` is saved, then the card root is emptied
+   by deleting files (not reformatted: navdata signing needs the volume serial) and the image written.
+   A crash leaves `pending` set: navdata stays blocked and the next run rewrites the card (the one case
+   where a card without the loader marker is written automatically; it is identified by serial).
+3. `firmware_confirm_needed` goes out (retried until delivered, repeated every 7 days).
+4. Navdata skips/refuses a card whose serial is pending (`_navdata_block_reason` in `cli.py`).
+5. `confirm`/`cancel` (CLI or the link) move `pending` to `restore`. The pre-step of `navdata auto-update`
+   (`auto.run_restore_pass`) then erases the loader files, restores the identity files with GADM's file
+   attributes and clears `restore`, before navdata runs; it never erases a card that has database files.
+   A card the pre-step had to mount stays mounted for navdata and is unmounted afterwards. The post-step
+   starts no new cycle for a card restored in the same run.
+
+`confirm_server.py` is a stdlib `http.server`: `GET /firmware/confirm/<token>` renders two forms (no state
+change, so mail scanners are harmless), `POST` with `action=installed|cancel` acts once and starts a detached
+`navdata auto-update`. Everything else is 404; bodies are capped at 4 KiB; requests are not logged.
+
 ## Authentication Details
 
 Token storage:
