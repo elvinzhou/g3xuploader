@@ -105,18 +105,18 @@ class CycleDecision:
     version: Optional[str] = None
 
 
-def _image_present(card: Path, pkg: PreparedPackage) -> bool:
+def image_present(card: Path, pkg: PreparedPackage) -> bool:
     return not any(_differs(card, f) for f in pkg.files)
 
 
 def decide(product: Product, pkg: PreparedPackage, card: Path, serial: str, state: FirmwareState,
-           fw, restored=()) -> CycleDecision:
+           fw, restored=(), fresh: bool = True) -> CycleDecision:
     if not product.cycle_capable:
         return CycleDecision("n/a")
     pend = state.pending(serial, product.key) if serial else None
     if pend:
         version = pend.get("version")
-        if _image_present(card, pkg) if pkg.version == version else False:
+        if pkg.version == version and image_present(card, pkg):
             return CycleDecision("awaiting", f"{product.name} {version} written, awaiting confirmation", version)
         return CycleDecision("resume", f"{product.name} {version} write incomplete", version)
     if not fw.database_card_cycle or not is_database_card(product, card):
@@ -128,7 +128,11 @@ def decide(product: Product, pkg: PreparedPackage, card: Path, serial: str, stat
     baseline = state.installed_version(serial, product.key)
     if not baseline:
         # First sight of this card: assume the avionics is up to date. Only versions
-        # published after this point are written to the card.
+        # published after this point are written to the card. The baseline must be
+        # what Garmin lists now, never an older package left in the cache.
+        if not fresh:
+            return CycleDecision("skip", "first time this card is seen, but Garmin could not be "
+                                 "checked in this run; no baseline recorded yet")
         return CycleDecision("adopt_baseline", f"first time this card is seen; assuming the avionics "
                              f"already has {pkg.version}", pkg.version)
     if not is_newer(pkg.version, baseline):

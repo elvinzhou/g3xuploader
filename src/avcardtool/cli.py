@@ -4124,7 +4124,9 @@ def firmware_set_installed(ctx, product_key: str, version: str, device: Optional
     """
     Record the software version the avionics already has (from its System Information page).
 
-    Needed once per database card before automatic firmware installs on it start.
+    Normally not needed: the first time a database card is seen, the avionics is
+    assumed to run the version Garmin lists at that moment. Use this to correct
+    that record (e.g. the avionics is actually behind).
     """
     from avcardtool.firmware.cards import is_database_card
     from avcardtool.firmware.catalog import parse_version
@@ -4205,7 +4207,7 @@ def firmware_status(ctx):
     state = FirmwareState(Path(ctx.obj['config'].system.data_dir))
     cards = state.data.get("cards") or {}
     if not cards:
-        click.echo("No cards tracked yet (record a baseline with 'firmware set-installed').")
+        click.echo("No cards tracked yet (a database card is recorded the first time it is seen).")
     for serial, by_product in cards.items():
         for key, e in (by_product or {}).items():
             click.echo(f"Card {serial} / {key}")
@@ -4241,7 +4243,8 @@ def firmware_auto_update(ctx, device: Optional[Path]):
 
     Checks Garmin, refreshes the cache, notifies about new versions and updates
     qualifying cards: a G3X card whose log shows an older version, or an
-    existing GTN loader card. Database cards are never touched.
+    existing GTN loader card. A GTN database card is wiped for firmware only
+    when a version newer than its recorded baseline exists (one-card cycle).
     """
     from avcardtool.firmware.auto import run_firmware_auto_update
     cfg = ctx.obj['config']

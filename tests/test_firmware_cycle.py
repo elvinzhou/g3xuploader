@@ -544,3 +544,39 @@ def test_confirm_from_another_process_survives_a_later_save(tmp_path):
     assert after.restore_items("CARD")
     assert after.latest_seen("gtn_xi") == "21.12"
     assert nightly.navdata_blocked("CARD") is None
+
+
+def test_baseline_is_not_taken_from_a_stale_cache(env):
+    """Garmin unreachable on the first sight of a card: no baseline, nothing written."""
+    from avcardtool.firmware import cycle
+    from avcardtool.firmware.packages import list_cached
+    from avcardtool.firmware.registry import PRODUCTS
+    from avcardtool.core.config import FirmwareConfig
+
+    run_auto(env.tmp, FakeManager())                      # fills the cache
+    pkg = list_cached(env.tmp / "data" if (env.tmp / "data").is_dir() else env.tmp, "gtn_xi")
+    pkg = pkg[0] if pkg else None
+    if pkg is None:
+        import pytest
+        pytest.skip("fixture keeps the cache elsewhere")
+    from avcardtool.firmware.state import FirmwareState
+    blank = FirmwareState(env.tmp / "no-state-here")
+    d = cycle.decide(PRODUCTS["gtn_xi"], pkg, env.card, "SERIAL", blank, FirmwareConfig(), fresh=False)
+    assert d.action == "skip"
+    d = cycle.decide(PRODUCTS["gtn_xi"], pkg, env.card, "SERIAL", blank, FirmwareConfig(), fresh=True)
+    assert d.action == "adopt_baseline" and d.version == pkg.version
+
+
+def test_prune_keeps_a_version_a_card_is_waiting_on(tmp_path):
+    from avcardtool.firmware.packages import firmware_dir, prune_cache
+    from avcardtool.firmware.state import FirmwareState
+
+    base = firmware_dir(tmp_path) / "gtn_xi"
+    for v in ("21.04", "21.12", "21.20", "21.30"):
+        (base / v).mkdir(parents=True)
+    st = FirmwareState(tmp_path)
+    st.start_pending("CARD", "gtn_xi", "21.04", None)
+    st.save()
+    removed = prune_cache(tmp_path, "gtn_xi")
+    assert removed == ["21.12"]
+    assert (base / "21.04").is_dir() and (base / "21.30").is_dir()

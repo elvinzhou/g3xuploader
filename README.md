@@ -2,10 +2,11 @@
 
 **Unified flight data processing and navigation database management for general aviation**
 
-AVCardTool combines two essential capabilities for general aviation into one streamlined system:
+AVCardTool combines three essential capabilities for general aviation into one streamlined system:
 
 1. **Flight Data Processing** - Automatically process flight logs, calculate Hobbs/Tach times, detect OOOI events, and upload to tracking services.
 2. **Navigation Database Management** - Download and install aviation databases (NavData, Terrain, Obstacles, Charts) to SD cards.
+3. **Avionics Software** - Keep G3X Touch and GTN Xi software current and write it to the cards that qualify.
 
 Built for reliability on Raspberry Pi and other Linux systems, AVCardTool is designed to run as a background service triggered by SD card insertions.
 
@@ -16,6 +17,7 @@ Built for reliability on Raspberry Pi and other Linux systems, AVCardTool is des
 - **Robust Garmin SSO**: Direct integration with flyGarmin (Aviation flow) with MFA support.
 - **Automatic SD Card Detection**: Triggered by udev, processed by systemd.
 - **Cards Stay Current**: A daily systemd timer re-checks flyGarmin so a card left in the reader picks up new cycles automatically.
+- **Avionics Software**: Checks Garmin's public pages for G3X Touch and GTN Xi software, caches new versions and writes them to qualifying cards ([Firmware Updates](#firmware-updates)).
 - **Email Notifications**: A summary email after each processing run (final Hobbs/Tach times, upload results) and whenever new database cycles land on a card — plus alerts when something needs attention (e.g. an expired flyGarmin login).
 - **Manufacturer-Agnostic**: Modular design to support various avionics (Garmin G3X, etc.).
 
@@ -30,9 +32,9 @@ curl -sSL https://raw.githubusercontent.com/elvinzhou/g3xuploader/main/install.s
 ```
 
 The installer will:
-1. Install system dependencies (`python3-venv`, `udev`, `fatattr`).
+1. Install system dependencies (`python3-venv`, `udev`, `fatattr`, and a best-effort `7zip` for GTN firmware packages).
 2. Create a virtual environment in `/opt/avcardtool/venv`.
-3. Install `avcardtool` and its dependencies.
+3. Install `avcardtool` and its dependencies (and a best-effort `py7zr`, the other way to unpack GTN firmware packages).
 4. **Launch the interactive setup wizard** (new installs only).
 5. Set up `udev` rules for automatic SD card detection.
 6. Install the `systemd` services for background processing.
@@ -143,35 +145,42 @@ It runs as part of `navdata auto-update` (card insert and the daily timer), afte
      version, the GCD files this tool copied are removed again (`remove_after_install`).
    - **GTN Xi**: only a card that already is a GTN loader card (it has `ldr_part_nmbr.txt` naming
      `GTN Xi`) is refreshed, by erasing it and copying Garmin's loader tree. The GTN's installed
-     version cannot be read, so the card's own part number/revision is compared.
+     version cannot be read, so the card's own part number/revision is compared. A card whose loader
+     is newer than the package is left alone (no downgrade).
 
 Safety rules:
 
 - A GTN loader card is a **dedicated card, never the navigation database card**. Garmin's service
   bulletin warns that powering a GTN with a loader card inserted and not loading the software can
-  corrupt its configuration. The automatic path never writes loader files to a card that has
-  `feat_unlk.dat`, `.gadm.meta`, `ldr_sys/avtn_db.bin`, `data_log/` or similar, and never creates a
-  loader card on its own.
+  corrupt its configuration. Outside the one-card cycle below, the automatic path never writes loader
+  files to a card that has `feat_unlk.dat`, `.gadm.meta`, `ldr_sys/avtn_db.bin`, `data_log/` or
+  similar, and never creates a loader card on its own.
 - Garmin's public GTN Xi bulletin is addressed to non-certified aircraft. Follow the bulletin
   (saved next to the cached package) for how to load the software.
 - Every file written to a card is checked by size and sha256 read-back.
+- Everything here is **on by default**, including on an upgraded install with no `firmware` section
+  (`enabled`, `auto_install` and `database_card_cycle` are all `true`). Set `auto_install` to `false`
+  to only check and download.
+- None of this has been verified on real G3X or GTN hardware yet; see *Not yet verified on hardware*
+  in [ARCHITECTURE.md](ARCHITECTURE.md#firmware-updates).
 - G3X packages need nothing extra. GTN packages are 7-Zip self-extractors (never executed); unpacking
-  needs `py7zr` (`pip install 'avcardtool[firmware]'`) or a `7zip`/`p7zip-full` system package
-  (`install.sh` tries to install one).
+  needs `py7zr` (`pip install 'avcardtool[firmware]'`) or a `7zip`/`p7zip-full` system package.
+  `install.sh` and `self-update` try to provide one.
 
 ```bash
-avcardtool firmware check                 # latest versions, cache, version each G3X card last logged
-avcardtool firmware download              # fill the cache only
-avcardtool firmware install g3x_touch [DEVICE]          # copy regardless of the installed version
-avcardtool firmware install gtn_xi DEVICE               # first-time GTN loader card (asks to confirm)
-avcardtool firmware install gtn_xi DEVICE --erase       # ...on a card that is not already a loader card
+avcardtool firmware check [--json]        # latest versions, cache, version each G3X card last logged
+avcardtool firmware download [--product P] # fill the cache only (P: g3x_touch or gtn_xi; default both)
+avcardtool firmware install g3x_touch [DEVICE]   # copy regardless of the installed version
+avcardtool firmware install gtn_xi [DEVICE]      # first-time GTN loader card (asks to confirm)
+avcardtool firmware install gtn_xi [DEVICE] --erase   # ...on a card that is not already a loader card
 avcardtool firmware auto-update [DEVICE]  # the unattended step on its own
 avcardtool --dry-run firmware auto-update # report only; nothing downloaded or written
 ```
 
-To make the first GTN loader card, put a blank, dedicated card in the reader and run
-`avcardtool firmware install gtn_xi /dev/sdX1`. `install` refuses a card that looks like a
-database/log card unless you pass `--erase`; it always asks before erasing unless `--yes`.
+`install` takes `--yes` / `-y` to skip its confirmation prompt. To make the first GTN loader card, put a
+blank, dedicated card in the reader and run `avcardtool firmware install gtn_xi /dev/sdX1`. `install`
+refuses a card that looks like a database/log card unless you pass `--erase`; it always asks before
+erasing unless `--yes`. `DEVICE` may be omitted when exactly one card is present.
 
 #### GTN Xi on its own database card (one-card cycle)
 
@@ -184,23 +193,31 @@ reinstalled on the next run. The card is never reformatted, so its volume serial
 
 The first time the tool sees a GTN database card it assumes the GTN is up to date: the version Garmin
 lists at that moment becomes the card's **baseline** and nothing is written. Any version published
-later starts the cycle. If the GTN is actually behind, run `avcardtool firmware install gtn_xi DEVICE
---erase` once (one cycle by hand), or correct the record with `avcardtool firmware set-installed
-gtn_xi 21.00` (the version on the GTN's System Information page).
+later starts the cycle. Nothing needs to be recorded by hand first.
+
+While a cycle is waiting, the confirmation request is repeated every 7 days. If you cancel instead,
+the card is restored and that version is not written to the card again; a later version starts a new
+cycle. `set-installed` records the version the GTN actually runs, to correct the baseline (for example
+after the GTN was updated outside avcardtool; the version is on its System Information page).
+`install gtn_xi DEVICE --erase` runs one cycle by hand on a card you choose.
 
 ```bash
-avcardtool firmware status                # baseline / pending / restore per card
-avcardtool firmware confirm [gtn_xi]      # same as the link: software installed
-avcardtool firmware cancel [gtn_xi]       # not installing; this version is not offered again for the card
+avcardtool firmware status                # per card: recorded version, pending, restore, declined
+avcardtool firmware set-installed gtn_xi 21.00 [DEVICE]   # record the version the GTN runs (or --card SERIAL)
+avcardtool firmware confirm [gtn_xi]      # same as the link: software installed (or --card SERIAL)
+avcardtool firmware cancel [gtn_xi]       # not installing: restore the card (or --card SERIAL)
 avcardtool firmware confirm-server        # serves the link (systemd: avcardtool-confirm.service)
 ```
 
-To get a clickable link set `firmware.confirm_url` to an address your phone can reach (a Cloudflare
-tunnel hostname or `http://<pi-address>:8765`, pointing at `firmware.confirm_listen`, default
-`127.0.0.1:8765`) and run `avcardtool self-update` (or `install.sh`) to install the small server unit.
-The link holds a long random single-use token and anyone with it can confirm, so treat it as private.
-Without `confirm_url` the email gives the two commands instead. Set `database_card_cycle` to `false`
-to turn the cycle off.
+To get a clickable link, set `firmware.confirm_url` to the public address that reaches the server: a
+Cloudflare tunnel hostname, or `http://<pi-address>:8765` on your LAN. For the LAN form,
+`firmware.confirm_listen` must accept connections from the phone's network (for example `0.0.0.0:8765`;
+the default `127.0.0.1:8765` only accepts local connections). Then run `avcardtool self-update` (or
+`install.sh`): the `avcardtool-confirm.service` unit is installed and started only when `confirm_url`
+is set. The page changes nothing until one of its two buttons is pressed, and each link works once.
+The server speaks plain HTTP, so privacy comes from the route to it (the tunnel or your LAN). Anyone
+holding a link can confirm, so treat links as private. Without `confirm_url` the email gives the two
+commands instead. Set `database_card_cycle` to `false` to turn the cycle off.
 
 Config (`firmware` section of `config.json`):
 
@@ -209,13 +226,33 @@ Config (`firmware` section of `config.json`):
 | `enabled` | `true` | Run the firmware step at all |
 | `auto_install` | `true` | `false` = check, download and notify only; never write cards |
 | `remove_after_install` | `true` | Delete the copied G3X GCD files once the log shows the new version |
-| `products` | `{}` | Per product (`g3x_touch`, `gtn_xi`): `{"enabled": true, "page_url": "<override>"}` |
+| `products` | `{}` | Per product (`g3x_touch`, `gtn_xi`): `{"enabled": true, "page_url": "<override>"}`; both enabled when absent |
 | `database_card_cycle` | `true` | GTN one-card cycle (above) |
 | `confirm_url` | `""` | Public base URL of the confirmation server; empty = no link, commands in the email |
 | `confirm_listen` | `127.0.0.1:8765` | Where `firmware confirm-server` listens |
 
-The firmware step is triggered by the same units as navdata, so it needs `auto_update_navdata`
-enabled for the timer and the insert service to be installed.
+```json
+"firmware": {
+  "enabled": true,
+  "auto_install": true,
+  "remove_after_install": true,
+  "products": {
+    "g3x_touch": {"enabled": true},
+    "gtn_xi": {"enabled": true, "page_url": "https://www8.garmin.com/support/download_details.jsp?id=15519"}
+  },
+  "database_card_cycle": true,
+  "confirm_url": "https://avcard.example.com",
+  "confirm_listen": "127.0.0.1:8765"
+}
+```
+
+The firmware step runs inside `navdata auto-update`, so it needs `auto_update_navdata` enabled for the
+timer and the insert service to be installed.
+
+Firmware events (email, under `notifications.events`, all `true` by default): `firmware_available`
+(INFO: new version cached, once per version), `firmware_card_written` (INFO: written to a card),
+`firmware_confirm_needed` (WARNING: GTN database card holds the loader; asks for confirmation) and
+`firmware_update_failed` (ERROR: a firmware run ended with errors).
 
 ### Email Notifications
 
@@ -353,10 +390,15 @@ avcardtool navdata download all           # Download subscribed databases
 avcardtool navdata install DB.taw         # Install to SD card
 
 # Avionics firmware (G3X Touch, GTN Xi)
-avcardtool firmware check                 # Latest published versions + what is cached
-avcardtool firmware download              # Download packages into the cache
-avcardtool firmware install PRODUCT [DEVICE]   # Write a package to a card
+avcardtool firmware check [--json]        # Latest published versions + what is cached
+avcardtool firmware download [--product PRODUCT]  # Download packages into the cache
+avcardtool firmware install PRODUCT [DEVICE] [--erase] [--yes]  # Write a package to a card
 avcardtool firmware auto-update [DEVICE]  # Check, cache, update qualifying cards
+avcardtool firmware set-installed PRODUCT VERSION [DEVICE]  # Record the version a GTN database card runs
+avcardtool firmware status                # Tracked cards: recorded version, pending, restore
+avcardtool firmware confirm [PRODUCT]     # Software installed on the GTN database card (--card SERIAL)
+avcardtool firmware cancel [PRODUCT]      # Not installing: restore the card (--card SERIAL)
+avcardtool firmware confirm-server        # Serve the one-time confirmation links
 
 # Configuration
 avcardtool config show                    # Print current configuration
@@ -375,11 +417,12 @@ When an SD card is inserted:
 1. **Udev** detects the card.
 2. **Systemd** starts `avcardtool-processor@.service` and `avcardtool-navdata@.service`.
 3. **Flight logs** are parsed, analyzed (Hobbs/Tach/OOOI), and uploaded.
-4. **Navdata updates** are automatically checked and installed.
+4. **Navdata updates** are automatically checked and installed, then the **avionics firmware** step
+   runs for the card (see [Firmware Updates](#firmware-updates)).
 5. **Notifications** (if enabled) email you the results.
 
 Cards left in the reader stay current: `avcardtool-navdata-check.timer`
-re-runs the navdata check daily at ~03:00 across all mounted cards
+re-runs the navdata check and the firmware step daily at ~03:00 across all mounted cards
 (`Persistent=true` catches up after a power-off), so a new cycle published
 overnight is installed before a morning flight.
 

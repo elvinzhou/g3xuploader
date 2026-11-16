@@ -29,7 +29,7 @@ avcardtool/
 │   │   ├── manager.py         # fan-out, retry, rate limiting; never raises
 │   │   ├── events.py          # pipeline results → NotificationEvent
 │   │   └── backends/          # email (SMTP); registry is pluggable
-│   ├── firmware/              # Avionics software: catalog, packages, cards, auto
+│   ├── firmware/              # Avionics software: registry, catalog, packages, cards, cycle, auto, state, confirm_server
 │   └── navdata/
 │       └── garmin/
 │           ├── auth.py        # SSO + OAuth login flow
@@ -50,14 +50,14 @@ AVCardTool installs into a per-user virtual environment at `/opt/avcardtool/venv
 with a symlink at `/usr/local/bin/avcardtool`. Only two components require root:
 
 - **udev rules** (`/etc/udev/rules.d/99-avcardtool-sdcard.rules`) — triggers on SD card insertion
-- **systemd units** (`/lib/systemd/system/avcardtool-*`) — on-insert processor/navdata services, daily navdata-check timer, weekly self-update timer
+- **systemd units** (`/lib/systemd/system/avcardtool-*`) — on-insert processor/navdata services, daily navdata-check timer, weekly self-update timer, and the firmware confirmation-link server (`avcardtool-confirm.service`, only when `firmware.confirm_url` is set)
 
 Everything else lives in user-space:
 
 | Path | Purpose |
 |------|---------|
 | `~/.config/avcardtool/config.json` | User configuration |
-| `~/.local/share/avcardtool/` | Data, logs, Garmin tokens |
+| `~/.local/share/avcardtool/` | Data, logs, Garmin tokens, firmware cache and per-card firmware state (`firmware/`) |
 | `/opt/avcardtool/venv/` | Python virtual environment |
 
 ### Updates
@@ -76,9 +76,11 @@ bump to `main` triggers the release CI, which builds a wheel and a `.deb`.
    `avcardtool navdata auto-update /dev/sdX`.
 3. **Flight Data**: deduplicates files, analyzes logs (Hobbs/Tach/OOOI), uploads.
 4. **Navdata** (if `auto_download: true`): checks for newer cycles, downloads and writes to card.
-5. **Notifications** (if enabled): a summary email is sent with the final
-   times/stats and any databases installed.
-6. Card is ready.
+5. **Firmware** (in the same `navdata auto-update` run, after navdata; see Firmware Updates): a
+   restore pre-step runs before navdata, the firmware post-step after it.
+6. **Notifications** (if enabled): a summary email is sent with the final
+   times/stats and any databases or firmware installed.
+7. Card is ready.
 
 ### Daily Re-Check (Cards Left Inserted)
 
@@ -89,7 +91,8 @@ idempotent, quiet days cost one aircraft API call; when a new cycle is
 published, the card in the reader is updated overnight and a
 `navdata_updated` email announces it. Failures — most importantly an
 expired Garmin login, which would otherwise stop updates silently —
-produce ERROR notifications (auth alerts rate-limited to one per 24h).
+produce ERROR notifications (auth alerts rate-limited to one per 24h). The firmware step runs at the
+end of the same run.
 
 ### Manual Navdata Update
 
@@ -436,9 +439,10 @@ nothing else is per device.
 - `packages.py` downloads (HEAD, `.part`, rename), validates the zip and builds
   `<data_dir>/firmware/<product>/<version>/image/` (exactly the tree for the card root) plus
   `package.json` (files, sizes, sha256; written last, so it marks a complete package).
-- `cards.py` decides per card and writes with fsync and sha256 read-back; `auto.py` is the
-  unattended run, called by `navdata auto-update` after the navdata work (`_run_firmware_step`
-  in `cli.py`, on every exit path, never raising). `state.json` makes "new version" notify once.
+- `cards.py` decides per card and writes with fsync and sha256 read-back; `cycle.py` is the
+  database-card cycle (below). `auto.py` is the unattended run. `navdata auto-update` (`cli.py`) runs
+  it in this order: restore pre-step (`run_restore_pass`), navdata, then the firmware post-step
+  (`_run_firmware_step`, on every exit path, never raising). `state.json` makes "new version" notify once.
 
 Two package kinds:
 
@@ -457,9 +461,9 @@ find the 7z signature, extract (py7zr, or a system 7-Zip), read `updateinfo.xml`
 `ldr_part_nmbr.txt` is written last so a half-written card never looks like a loader card.
 
 Safety: Garmin's service bulletin says powering a GTN with a loader card in and not loading can
-corrupt its configuration, and the loader card is separate from the database card. So the automatic
-path only refreshes a card that already has `ldr_part_nmbr.txt` naming `GTN Xi` and none of the
-database-card markers (`feat_unlk.dat`, `.gadm.meta`, `ldr_sys/avtn_db.bin`, `data_log/`, ...);
+corrupt its configuration, and the loader card is separate from the database card. So, apart from the
+one-card cycle below, the automatic path only refreshes a card that already has `ldr_part_nmbr.txt`
+naming `GTN Xi` and none of the database-card markers (`feat_unlk.dat`, `.gadm.meta`, `ldr_sys/avtn_db.bin`, `data_log/`, ...);
 creating a loader card is only done by `firmware install gtn_xi` (needs `--erase` on a non-loader,
 non-empty card).
 
@@ -467,29 +471,62 @@ non-empty card).
 
 For loader-card products the avionics' own database card can be used (`firmware.database_card_cycle`).
 The product registry says how to recognise that card without a Garmin login (`avionics.txt` naming
-the product, or `ldr_sys/nav_db2.bin`; never a card with another product's logs). Per card volume
-serial, `state.json` keeps `installed_version` (the baseline: the release current when the card is first seen, `firmware set-installed`, or a
-confirmation), `pending` (`version`, `token`, `backup_dir`, notification times), `restore` and
-declined versions.
+the product, or `ldr_sys/nav_db2.bin`); a card with another product's flight logs or `avionics.txt` is
+never taken. Per card volume serial, `state.json` holds:
 
-1. Qualifies only with a baseline lower than the release, no pending cycle, a serial. A card seen for the
-   first time is assumed current: the release becomes its baseline and nothing is written.
-2. The package is re-hashed, `avionics.txt`/`feat_unlk.dat`/`.evidf.dat`/`.gadm.meta` are backed up to
-   `<data_dir>/firmware/cards/<serial>/backup/`, `pending` is saved, then the card root is emptied
-   by deleting files (not reformatted: navdata signing needs the volume serial) and the image written.
-   A crash leaves `pending` set: navdata stays blocked and the next run rewrites the card (the one case
-   where a card without the loader marker is written automatically; it is identified by serial).
-3. `firmware_confirm_needed` goes out (retried until delivered, repeated every 7 days).
-4. Navdata skips/refuses a card whose serial is pending (`_navdata_block_reason` in `cli.py`).
-5. `confirm`/`cancel` (CLI or the link) move `pending` to `restore`. The pre-step of `navdata auto-update`
-   (`auto.run_restore_pass`) then erases the loader files, restores the identity files with GADM's file
-   attributes and clears `restore`, before navdata runs; it never erases a card that has database files.
-   A card the pre-step had to mount stays mounted for navdata and is unmounted afterwards. The post-step
-   starts no new cycle for a card restored in the same run.
+- `installed_version`: the baseline. Set the first time the card is seen (to the release Garmin lists
+  then), by `firmware set-installed`, or by a confirmation.
+- `pending`: `version`, `token`, `backup_dir`, `written_at` and notification times.
+- `restore`: set by confirm or cancel; cleared once the restore has run.
+- `declined`: versions cancelled for this card.
 
-`confirm_server.py` is a stdlib `http.server`: `GET /firmware/confirm/<token>` renders two forms (no state
-change, so mail scanners are harmless), `POST` with `action=installed|cancel` acts once and starts a detached
-`navdata auto-update`. Everything else is 404; bodies are capped at 4 KiB; requests are not logged.
+1. A cycle starts only for a card with a serial, no `pending` entry, a baseline lower than the package
+   and a version not in `declined`. On first sight the release becomes the baseline and nothing is written.
+2. The package is verified again, `avionics.txt`/`feat_unlk.dat`/`.evidf.dat`/`.gadm.meta` are copied to
+   `<data_dir>/firmware/cards/<serial>/backup/`, `pending` is saved, the card root is emptied by deleting
+   files (never reformatted, so the volume serial survives) and the image is written, loader marker last.
+   A crash leaves `pending` set: navdata stays blocked and the next run writes the card again. This is
+   the one case where a card without the loader marker is written automatically; it is matched by serial.
+3. `firmware_confirm_needed` goes out and is retried until delivered, then repeated every 7 days while pending.
+4. Navdata skips a card whose serial has a `pending` entry (`_navdata_block_reason` in `cli.py`).
+5. `confirm` (software installed) or `cancel` (not installing; the version is added to `declined`) moves
+   `pending` to `restore`. The pre-step of `navdata auto-update` (`auto.run_restore_pass`) then removes the
+   loader files, copies the identity files back with GADM's file attributes and clears `restore`, all
+   before navdata runs. It never erases a card that has database files. A card the pre-step had to mount
+   stays mounted for navdata and is unmounted afterwards. The post-step starts no new cycle for a card
+   restored in the same run.
+
+`confirm_server.py` is a stdlib `http.server` for the link. `GET /firmware/confirm/<token>` shows the
+product, version and two buttons and changes nothing (so mail scanners are harmless); `POST` with
+`action=installed|cancel` acts once and starts a detached `navdata auto-update`. Tokens are 32 random
+bytes (URL-safe), removed on use, and never logged. Everything else is 404; bodies are capped at 4 KiB.
+The server speaks plain HTTP, so the route to it (a Cloudflare tunnel or the LAN) is what keeps the token
+private. `systemd/avcardtool-confirm.service` runs it; `install.sh` and `self-update` install and start it
+only when `firmware.confirm_url` is set.
+
+### Data on disk and cache pruning
+
+Everything is under `<data_dir>/firmware/`:
+
+| Path | Contents |
+|------|----------|
+| `<product>/<version>/` | `package.json` (written last; its presence marks a complete package), `image/` (the card-root tree), the service bulletin PDF. The zip is kept only until the image is built |
+| `state.json` (+ `state.lock`) | Last version seen, versions already announced, and the per-card cycle state above |
+| `cards/<serial>/backup/` | Identity files of a database card taken before a cycle; removed after its restore |
+
+After a new package is downloaded, `prune_cache` keeps the newest two version directories of that product
+(`KEEP_VERSIONS`). It does not check whether a pending cycle still needs an older version.
+
+### Not yet verified on hardware
+
+None of the firmware behaviour above has been run on real avionics yet. Open questions:
+
+- Deleting files from the database card's mount during the wipe, in particular read-only database files.
+- Whether the GTN writes to the loader card during a software update. The automatic refresh compares the
+  card with the package and would rewrite it.
+- Whether navdata can re-identify a card that had no `avionics.txt` before the cycle. Restore only puts
+  back the identity files that existed.
+- G3X behaviour when the firmware `Garmin/` files share the card with databases and flight logs.
 
 ## Authentication Details
 

@@ -162,6 +162,20 @@ def _version_key(version: str):
         return ()
 
 
+def _pending_versions(data_dir, product_key: str) -> set:
+    """Versions a card is still waiting on (written, not yet confirmed): never pruned."""
+    try:
+        cards = json.loads((firmware_dir(data_dir) / "state.json").read_text()).get("cards") or {}
+        return {
+            str(entry["pending"].get("version"))
+            for by_product in cards.values() if isinstance(by_product, dict)
+            for key, entry in by_product.items()
+            if key == product_key and isinstance(entry, dict) and isinstance(entry.get("pending"), dict)
+        }
+    except (OSError, ValueError, AttributeError):
+        return set()
+
+
 def prune_cache(data_dir, product_key: str, keep: int = KEEP_VERSIONS) -> List[str]:
     """Delete all but the newest ``keep`` version directories of a product."""
     base = firmware_dir(data_dir) / product_key
@@ -169,8 +183,11 @@ def prune_cache(data_dir, product_key: str, keep: int = KEEP_VERSIONS) -> List[s
         return []
     dirs = sorted((d for d in base.iterdir() if d.is_dir()),
                   key=lambda d: _version_key(d.name), reverse=True)
+    in_use = _pending_versions(data_dir, product_key)
     removed = []
     for d in dirs[keep:]:
+        if d.name in in_use:
+            continue
         shutil.rmtree(d, ignore_errors=True)
         removed.append(d.name)
     return removed

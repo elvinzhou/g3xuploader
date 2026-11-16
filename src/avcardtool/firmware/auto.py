@@ -195,9 +195,11 @@ def _run(cfg, device: Optional[Path], log: logging.Logger, notify_manager, issue
     for product in PRODUCTS.values():
         if not fw.product_enabled(product.key):
             continue
-        _release, pkg = refresh_product(cfg, product, state, notify_manager, log, issues, download=not dry_run)
+        release, pkg = refresh_product(cfg, product, state, notify_manager, log, issues, download=not dry_run)
         if pkg:
             packages[product.key] = pkg
+            # Only a version Garmin listed in this run may become a card's baseline.
+            pkg.fresh = bool(release and release.version == pkg.version)
 
     if not dry_run:
         cycle.send_due_notifications(cfg, state, notify_manager, log)
@@ -246,6 +248,9 @@ def _handle_cycle(cfg, product: Product, pkg: PreparedPackage, decision, card, d
             log.error(f"  {msg}")
             issues.append(("ERROR", msg))
             return
+        if cycle.image_present(mount, pkg):
+            log.info(f"  {product.name} {pkg.version} is on the card, awaiting confirmation")
+            return
     if dry_run:
         log.info(f"  DRY RUN {product.name}: would back up the identity files, wipe the card by deleting "
                  f"files, write the {pkg.version} loader and ask for confirmation")
@@ -281,7 +286,8 @@ def _process_card(cfg, card, packages: Dict[str, PreparedPackage], mounts: Mount
     for key, pkg in packages.items():
         product = PRODUCTS[key]
         if state is not None and product.cycle_capable:
-            decision = cycle.decide(product, pkg, mount, serial, state, fw, restored or set())
+            decision = cycle.decide(product, pkg, mount, serial, state, fw, restored or set(),
+                                    fresh=getattr(pkg, "fresh", True))
             if decision.action != "n/a":
                 _handle_cycle(cfg, product, pkg, decision, card, dev, mount, serial, mounts, state,
                               notify_manager, log, issues, dry_run)
