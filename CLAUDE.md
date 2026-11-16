@@ -14,8 +14,8 @@ Processes Garmin G3X flight logs and keeps Garmin avionics SD cards' databases c
 - Compare installs against GADM-written cards before changing signing/attributes.
 - Avionics firmware (G3X Touch GCD folder, GTN Xi Copy2Card loader card): `src/avcardtool/firmware/`,
   described in `ARCHITECTURE.md` ("Firmware Updates"). The automatic path wipes a GTN database card for
-  firmware only when a baseline installed version is recorded for that card serial and a newer version
-  exists; navdata is blocked for that serial until confirm/cancel; never reformat (the volume serial
+  firmware only when a version newer than that card serial's baseline exists (the baseline is the
+  release current when the card is first seen, assumed installed); navdata is blocked for that serial until confirm/cancel; never reformat (the volume serial
   must survive). It never writes loader files to any other database/log card.
 - Treat user/account identifiers (serials, device IDs, tail numbers, account names) as private; don't
   commit them or send them to outside services.

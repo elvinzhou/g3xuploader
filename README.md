@@ -182,10 +182,11 @@ card are paused; after you confirm, the loader files are removed, the card's `av
 `feat_unlk.dat` / `.evidf.dat` / `.gadm.meta` are put back from a backup, and the databases are
 reinstalled on the next run. The card is never reformatted, so its volume serial survives.
 
-It only starts when a **baseline** is recorded for that card: tell it what the GTN already has
-(System Information page) with `avcardtool firmware set-installed gtn_xi 21.00`, with the card in the
-reader. Without a baseline nothing is ever wiped (otherwise the first run would wipe a card whose GTN
-is already current). `avcardtool firmware install gtn_xi DEVICE --erase` does one cycle by hand.
+The first time the tool sees a GTN database card it assumes the GTN is up to date: the version Garmin
+lists at that moment becomes the card's **baseline** and nothing is written. Any version published
+later starts the cycle. If the GTN is actually behind, run `avcardtool firmware install gtn_xi DEVICE
+--erase` once (one cycle by hand), or correct the record with `avcardtool firmware set-installed
+gtn_xi 21.00` (the version on the GTN's System Information page).
 
 ```bash
 avcardtool firmware status                # baseline / pending / restore per card
@@ -209,7 +210,7 @@ Config (`firmware` section of `config.json`):
 | `auto_install` | `true` | `false` = check, download and notify only; never write cards |
 | `remove_after_install` | `true` | Delete the copied G3X GCD files once the log shows the new version |
 | `products` | `{}` | Per product (`g3x_touch`, `gtn_xi`): `{"enabled": true, "page_url": "<override>"}` |
-| `database_card_cycle` | `true` | GTN one-card cycle (above); needs a recorded baseline |
+| `database_card_cycle` | `true` | GTN one-card cycle (above) |
 | `confirm_url` | `""` | Public base URL of the confirmation server; empty = no link, commands in the email |
 | `confirm_listen` | `127.0.0.1:8765` | Where `firmware confirm-server` listens |
 

@@ -8,8 +8,8 @@ One-card firmware cycle for loader-card products (GTN Xi) on the avionics' own d
   restore  after confirm/cancel: remove the loader files, put the identity files back;
            navdata then reinstalls the databases.
 
-Nothing here runs without a recorded baseline (the version the avionics already has):
-a card whose avionics is already current must never be wiped.
+The first time a card is seen its avionics is assumed to be current: that version becomes
+the baseline, and only versions published later start a cycle.
 """
 
 import logging
@@ -43,10 +43,10 @@ logger = logging.getLogger(__name__)
 IDENTITY_FILES = ("avionics.txt", "feat_unlk.dat", ".evidf.dat", ".gadm.meta")
 CONFIRM_PATH = "/firmware/confirm/"
 BASELINE_HINT = (
-    "Automatic installs on the {name} database card start once the installed version is "
-    "recorded: avcardtool firmware set-installed {key} <version> (read it from the {name}'s "
-    "System Information page), or use 'avcardtool firmware install {key} <device> --erase' "
-    "to do it once by hand."
+    "The first time the {name} database card is seen, the {name} is assumed to already run the "
+    "version current at that moment; any later version is written to that card automatically. "
+    "If the {name} is behind, run 'avcardtool firmware install {key} <device> --erase' once, or "
+    "correct the record with 'avcardtool firmware set-installed {key} <version>'."
 )
 
 
@@ -100,7 +100,7 @@ def restore_identity(card: Path, src: Path) -> List[str]:
 
 @dataclass
 class CycleDecision:
-    action: str   # n/a | no_baseline | current | declined | skip | start | resume | awaiting
+    action: str   # n/a | adopt_baseline | current | declined | skip | start | resume | awaiting
     reason: str = ""
     version: Optional[str] = None
 
@@ -127,7 +127,10 @@ def decide(product: Product, pkg: PreparedPackage, card: Path, serial: str, stat
         return CycleDecision("skip", "card was restored in this run")
     baseline = state.installed_version(serial, product.key)
     if not baseline:
-        return CycleDecision("no_baseline", "no installed version recorded; " + baseline_hint(product))
+        # First sight of this card: assume the avionics is up to date. Only versions
+        # published after this point are written to the card.
+        return CycleDecision("adopt_baseline", f"first time this card is seen; assuming the avionics "
+                             f"already has {pkg.version}", pkg.version)
     if not is_newer(pkg.version, baseline):
         return CycleDecision("current", f"avionics has {baseline}, package is {pkg.version}")
     if state.is_declined(serial, product.key, pkg.version):

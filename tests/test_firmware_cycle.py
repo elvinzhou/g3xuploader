@@ -89,14 +89,22 @@ def test_is_database_card(tmp_path):
 # start gate
 # ---------------------------------------------------------------------------
 
-def test_no_baseline_never_wipes_and_says_how_to_set_it(env):
+def test_first_sight_assumes_current_and_never_wipes(env):
     before = tree(env.card)
     mgr = FakeManager()
     assert run_auto(env.tmp, mgr) == []
     assert tree(env.card) == before
-    assert state_of(env.tmp).pending_items() == []
+    st = state_of(env.tmp)
+    assert st.pending_items() == []
+    serials = list((st.data.get("cards") or {}).keys())
+    assert len(serials) == 1
+    latest = st.latest_seen("gtn_xi")
+    assert latest and st.installed_version(serials[0], "gtn_xi") == latest
     body = next(e for e in mgr.events if e.event_type == "firmware_available").body
-    assert "firmware set-installed gtn_xi" in body and "--erase" in body
+    assert "assumed" in body and "--erase" in body
+    # A second run with the same release still leaves the card alone.
+    assert run_auto(env.tmp, FakeManager()) == []
+    assert tree(env.card) == before and state_of(env.tmp).pending_items() == []
 
 
 def test_baseline_not_older_than_release_does_nothing(env):

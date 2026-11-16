@@ -231,6 +231,11 @@ def _handle_cycle(cfg, product: Product, pkg: PreparedPackage, decision, card, d
                   log: logging.Logger, issues: List[Issue], dry_run: bool) -> None:
     """One-card cycle step for a database card (start, resume or just report)."""
     log.info(f"  {product.name} {pkg.version}: {decision.action} — {decision.reason}")
+    if decision.action == "adopt_baseline":
+        if not dry_run:
+            state.set_installed(serial, product.key, decision.version)
+            state.save()
+        return
     if decision.action not in ("start", "resume"):
         return
     if decision.action == "resume" and pkg.version != decision.version:

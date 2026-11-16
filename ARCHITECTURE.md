@@ -468,11 +468,12 @@ non-empty card).
 For loader-card products the avionics' own database card can be used (`firmware.database_card_cycle`).
 The product registry says how to recognise that card without a Garmin login (`avionics.txt` naming
 the product, or `ldr_sys/nav_db2.bin`; never a card with another product's logs). Per card volume
-serial, `state.json` keeps `installed_version` (the baseline: set by `firmware set-installed` or by a
+serial, `state.json` keeps `installed_version` (the baseline: the release current when the card is first seen, `firmware set-installed`, or a
 confirmation), `pending` (`version`, `token`, `backup_dir`, notification times), `restore` and
 declined versions.
 
-1. Qualifies only with a baseline lower than the release (**no baseline: never wipe**), no pending cycle, a serial.
+1. Qualifies only with a baseline lower than the release, no pending cycle, a serial. A card seen for the
+   first time is assumed current: the release becomes its baseline and nothing is written.
 2. The package is re-hashed, `avionics.txt`/`feat_unlk.dat`/`.evidf.dat`/`.gadm.meta` are backed up to
    `<data_dir>/firmware/cards/<serial>/backup/`, `pending` is saved, then the card root is emptied
    by deleting files (not reformatted: navdata signing needs the volume serial) and the image written.
