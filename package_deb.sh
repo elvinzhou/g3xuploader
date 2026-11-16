@@ -66,6 +66,7 @@ Section: utils
 Priority: optional
 Architecture: ${ARCH}
 Depends: python3 (>= 3.9), python3-venv, python3-pip, udev, util-linux, curl
+Recommends: 7zip | p7zip-full
 Maintainer: AVCardTool Contributors <noreply@github.com>
 Description: Aviation SD card tool - flight data processing and navdata management
  Unified tool for G3X flight logs and Garmin navigation databases.

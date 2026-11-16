@@ -10,6 +10,7 @@ from avcardtool.core.config import (
     FlightDetectionConfig,
     FlightDataConfig,
     NavdataConfig,
+    FirmwareConfig,
     NotificationsConfig,
     SystemConfig,
 )
@@ -34,6 +35,7 @@ __all__ = [
     "FlightDetectionConfig",
     "FlightDataConfig",
     "NavdataConfig",
+    "FirmwareConfig",
     "NotificationsConfig",
     "SystemConfig",
     "setup_logging",

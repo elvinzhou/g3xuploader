@@ -38,6 +38,12 @@ classifiers = [
 python = ">=3.9,<3.15"
 requests = "^2.28.0"
 click = "^8.0.0"
+# Unpacks GTN firmware packages (Garmin's Copy2Card self-extractor); a system
+# 7-Zip binary (7zz/7z/7za/7zr) works instead.
+py7zr = {version = ">=0.20", optional = true}
+
+[tool.poetry.extras]
+firmware = ["py7zr"]
 
 
 [tool.poetry.group.dev.dependencies]
@@ -48,6 +54,7 @@ isort = "^5.12.0"
 mypy = "^1.0.0"
 types-requests = "^2.28.0"
 pyinstaller = "^6.19.0"
+py7zr = ">=0.20"   # exercises the GTN package tests
 
 [tool.poetry.scripts]
 avcardtool = "avcardtool.cli:main"

@@ -1,5 +1,5 @@
 [Unit]
-Description=AVCardTool Daily NavData Update Check Timer
+Description=AVCardTool Daily NavData and Firmware Update Check Timer
 Documentation=https://github.com/elvinzhou/g3xuploader
 
 [Timer]

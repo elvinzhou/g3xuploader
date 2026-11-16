@@ -93,6 +93,40 @@ class NavdataConfig:
 
 
 @dataclass
+class FirmwareConfig:
+    """
+    Avionics firmware (system software) handling.
+
+    enabled: check Garmin's public download pages, cache new packages, notify.
+    auto_install: also write them to inserted cards (false = check, download
+        and notify only; cards are never written).
+    remove_after_install: delete the GCD files this feature copied once the
+        display's own log shows the new version is running.
+    products: per-product settings, keyed by product key (g3x_touch, gtn_xi):
+        {"enabled": true, "page_url": "<override of the Garmin version page>"}
+    database_card_cycle: for loader-card products (GTN Xi), update the avionics'
+        own database card: wipe it, write the loader, block navdata for that card
+        until the pilot confirms. Only with a recorded baseline version.
+    confirm_url: public base URL of 'firmware confirm-server' (empty = no link;
+        notifications then give the CLI commands).
+    confirm_listen: host:port the confirm server binds to.
+    """
+    enabled: bool = True
+    auto_install: bool = True
+    remove_after_install: bool = True
+    products: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    database_card_cycle: bool = True
+    confirm_url: str = ""
+    confirm_listen: str = "127.0.0.1:8765"
+
+    def product_enabled(self, key: str) -> bool:
+        return bool((self.products.get(key) or {}).get("enabled", True))
+
+    def product_page_url(self, key: str) -> Optional[str]:
+        return (self.products.get(key) or {}).get("page_url") or None
+
+
+@dataclass
 class NotificationsConfig:
     """Notification delivery configuration (see NOTIFICATIONS_DESIGN.md)"""
     enabled: bool = False
@@ -100,6 +134,10 @@ class NotificationsConfig:
         "flights_processed": True,
         "navdata_updated": True,
         "navdata_update_failed": True,
+        "firmware_available": True,
+        "firmware_card_written": True,
+        "firmware_update_failed": True,
+        "firmware_confirm_needed": True,
         "garmin_auth_expired": True,
         "processing_error": True,
     })
@@ -162,6 +200,7 @@ class Config:
         self.config_path = config_path or self._find_config()
         self.flight_data = FlightDataConfig()
         self.navdata = NavdataConfig()
+        self.firmware = FirmwareConfig()
         self.notifications = NotificationsConfig()
         self.system = SystemConfig()
         # Original values of system fields overridden from the command line;
@@ -235,6 +274,17 @@ class Config:
             self.navdata.enabled = nd.get("enabled", True)
             self.navdata.auto_download = nd.get("auto_download", False)
             self.navdata.garmin = nd.get("garmin", {})
+
+        # Load firmware config
+        if "firmware" in data:
+            fw = data["firmware"]
+            self.firmware.enabled = fw.get("enabled", True)
+            self.firmware.auto_install = fw.get("auto_install", True)
+            self.firmware.remove_after_install = fw.get("remove_after_install", True)
+            self.firmware.products = fw.get("products", {}) or {}
+            self.firmware.database_card_cycle = fw.get("database_card_cycle", True)
+            self.firmware.confirm_url = fw.get("confirm_url", "") or ""
+            self.firmware.confirm_listen = fw.get("confirm_listen", "127.0.0.1:8765") or "127.0.0.1:8765"
 
         # Load notifications config
         if "notifications" in data:
@@ -317,6 +367,7 @@ class Config:
                 "auto_download": self.navdata.auto_download,
                 "garmin": self.navdata.garmin
             },
+            "firmware": asdict(getattr(self, "firmware", None) or FirmwareConfig()),
             "notifications": asdict(self.notifications),
             "system": {**asdict(self.system), **getattr(self, "_system_overrides", {})}
         }
@@ -382,6 +433,24 @@ class Config:
         if self.flight_data.airframe_time.trigger not in ["rpm", "oil_pressure", "flight_time"]:
             raise ValueError(f"Invalid airframe_time trigger: {self.flight_data.airframe_time.trigger}")
 
+        # Validate firmware settings
+        from avcardtool.firmware.registry import PRODUCTS
+        for key, prod_cfg in (getattr(self, "firmware", None) or FirmwareConfig()).products.items():
+            if key not in PRODUCTS:
+                raise ValueError(f"Unknown firmware product: {key} (known: {', '.join(PRODUCTS)})")
+            if not isinstance(prod_cfg, dict):
+                raise ValueError(f"firmware.products.{key} must be an object")
+            url = prod_cfg.get("page_url")
+            if url is not None and not str(url).startswith("https://"):
+                raise ValueError(f"firmware.products.{key}.page_url must be an https URL")
+
+        fwc = getattr(self, "firmware", None) or FirmwareConfig()
+        if fwc.confirm_url and not fwc.confirm_url.startswith(("http://", "https://")):
+            raise ValueError("firmware.confirm_url must start with http:// or https://")
+        host, _, port = fwc.confirm_listen.rpartition(":")
+        if not host or not port.isdigit() or not 0 < int(port) < 65536:
+            raise ValueError("firmware.confirm_listen must look like host:port")
+
         # Validate system paths
         data_dir = Path(self.system.data_dir)
         if not data_dir.parent.exists():
@@ -419,6 +488,7 @@ class Config:
         config.config_path = path
         config.flight_data = FlightDataConfig()
         config.navdata = NavdataConfig()
+        config.firmware = FirmwareConfig()
         config.notifications = NotificationsConfig()
         config.system = SystemConfig()  # always fresh defaults, never inherits a stale config
 
@@ -454,6 +524,11 @@ class Config:
         config.navdata.garmin = {
             "email": "your-flygarmin-email@example.com",
             "databases": ["navdata", "terrain", "obstacles"]
+        }
+
+        config.firmware.products = {
+            "g3x_touch": {"enabled": True},
+            "gtn_xi": {"enabled": True},
         }
 
         config.notifications.backends = {

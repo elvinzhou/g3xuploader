@@ -163,6 +163,10 @@ class NotificationBackend(ABC):
 | `flights_processed` | INFO (WARNING if any upload failed) | `auto_process()` | ≥1 new file was processed this run. **Not** fired when every file was already processed — a card re-insert with nothing new stays silent. |
 | `navdata_updated` | INFO | `navdata_auto_update()` per card | ≥1 file was actually installed to the card. The idempotent fast-exit paths ("all current", CRC match) stay silent, so the daily timer produces no noise on the ~27 days per cycle when nothing changed. |
 | `navdata_update_failed` | ERROR | `navdata_auto_update()` end of run | The `issues` list contains any ERROR entries (download failed, install failed, mount failed). WARNINGs alone (e.g. batch-session fallback) don't fire it; they ride along in the body when an ERROR does. |
+| `firmware_available` | INFO | `firmware.auto.refresh_product()` | A new G3X Touch / GTN Xi software version was downloaded to the cache; sent once per version (`<data_dir>/firmware/state.json`), retried if delivery failed. |
+| `firmware_card_written` | INFO | `firmware.auto` per card | Firmware was written to a card (not for the cleanup of copied GCD files). Body says what the pilot must do next. |
+| `firmware_update_failed` | ERROR | `firmware.auto.run_firmware_auto_update()` end of run | Any ERROR in the firmware issues list (network-only problems are WARNINGs and ride along). |
+| `firmware_confirm_needed` | WARNING | `firmware.cycle.send_confirm_needed()` | A GTN database card was wiped and holds the loader; asks for confirmation. The body has the one-time link when `firmware.confirm_url` is set, else the `firmware confirm` / `cancel` commands. Retried until delivered, repeated every 7 days while pending. |
 | `garmin_auth_expired` | ERROR | `navdata_auto_update()` auth guard | `ensure_authenticated()` returned False. Body includes the fix: `avcardtool navdata login`. Rate-limited to once per 24h via a state file (`<data_dir>/notifications/state.json`) so the daily timer doesn't nag daily forever. |
 | `processing_error` | ERROR | `auto_process()` | Unhandled per-run failure (e.g. mount error, zero uploaders configured but uploads expected). Per-file parse errors stay in the `flights_processed` body instead. |
 
@@ -186,6 +190,10 @@ New top-level `notifications` section in `config.json`, with a
     "flights_processed": true,
     "navdata_updated": true,
     "navdata_update_failed": true,
+    "firmware_available": true,
+    "firmware_card_written": true,
+    "firmware_update_failed": true,
+    "firmware_confirm_needed": true,
     "garmin_auth_expired": true,
     "processing_error": true
   },

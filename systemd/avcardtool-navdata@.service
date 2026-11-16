@@ -1,5 +1,5 @@
 [Unit]
-Description=AVCardTool NavData Auto-Update for %i
+Description=AVCardTool NavData and Firmware Auto-Update for %i
 Documentation=https://github.com/elvinzhou/g3xuploader
 # Keep this unit alive as long as the block device exists
 BindsTo=dev-%i.device
@@ -9,7 +9,8 @@ After=udisks2.service
 
 [Service]
 Type=oneshot
-# Brief pause to let udisks2 finish mounting before we scan
+# Brief pause to let udisks2 finish mounting before we scan.
+# 'navdata auto-update' also runs the avionics firmware step for this card.
 ExecStartPre=/bin/sleep 3
 ExecStart=/usr/local/bin/avcardtool navdata auto-update /dev/%i
 StandardOutput=journal

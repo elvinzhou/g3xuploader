@@ -2103,6 +2103,11 @@ def navdata_install(ctx, sd_card: Optional[Path], from_dir: Optional[Path], yes:
     with open(manifest_path) as f:
         manifest = json.load(f)
 
+    blocked = _navdata_block_reason(cfg, manifest.get("card_serial"))
+    if blocked:
+        click.echo(blocked, err=True)
+        sys.exit(1)
+
     entries = manifest.get("entries", [])
     if not entries:
         click.echo("Manifest is empty — nothing to install.", err=True)
@@ -2562,7 +2567,76 @@ def navdata_auto_update(ctx, device: Optional[Path]):
     With the global --dry-run, steps 1-2 run against the real card (mounted
     read-only) and flyGarmin, and the plan is reported, but nothing is
     unlocked, downloaded, or written to the card.
+
+    After the navdata work (whatever its outcome) the avionics firmware step
+    runs too: it checks Garmin's G3X Touch / GTN Xi software pages, caches new
+    packages and updates qualifying cards (see 'avcardtool firmware').
     """
+    # Restore pre-step: cards whose firmware cycle was confirmed/cancelled get their
+    # loader files removed and identity files back BEFORE navdata looks at them.
+    tracker, restored = _run_firmware_prestep(ctx, device)
+    try:
+        try:
+            _navdata_auto_update_impl(ctx, device)
+        finally:
+            # Cards the pre-step had to mount stayed mounted for navdata; release them now.
+            if tracker is not None:
+                try:
+                    tracker.release()
+                except Exception:
+                    logging.getLogger("avcardtool.firmware").exception("Could not release card mounts")
+    finally:
+        if not isinstance(sys.exc_info()[1], KeyboardInterrupt):
+            _run_firmware_step(ctx, device, restored)
+
+
+def _run_firmware_prestep(ctx, device: Optional[Path]):
+    """Restore cards after a confirmed/cancelled firmware cycle. Never raises: (tracker|None, serials)."""
+    try:
+        from avcardtool.firmware.auto import run_restore_pass
+        return run_restore_pass(ctx.obj['config'], device, logging.getLogger("avcardtool.firmware"))
+    except Exception:
+        logging.getLogger("avcardtool.firmware").exception("Firmware restore step failed")
+        return None, set()
+
+
+def _navdata_block_reason(cfg, serial: Optional[str]) -> Optional[str]:
+    """Why navdata must not touch the card with this volume serial (a firmware cycle is pending)."""
+    if not serial or serial == "0":
+        return None
+    try:
+        from avcardtool.firmware.state import FirmwareState
+        reason = FirmwareState(Path(cfg.system.data_dir)).navdata_blocked(serial)
+    except Exception:
+        return None
+    if not reason:
+        return None
+    return (f"Database updates are paused for this card: {reason}. Once the avionics software is "
+            f"installed run 'avcardtool firmware confirm', or 'avcardtool firmware cancel' if you "
+            f"are not installing it.")
+
+
+def _run_firmware_step(ctx, device: Optional[Path], restored=None) -> None:
+    """Run the firmware auto-update; log and swallow anything it raises."""
+    _flog = logging.getLogger("avcardtool.firmware")
+    try:
+        cfg = ctx.obj['config']
+        fw = getattr(cfg, 'firmware', None)
+        if fw is None or not fw.enabled:
+            return
+        from avcardtool.firmware.auto import run_firmware_auto_update
+        issues = run_firmware_auto_update(cfg, device, _flog, _notification_manager(cfg), restored)
+        if issues:
+            _flog.error("FIRMWARE UPDATE COMPLETED WITH ISSUES (%d):", len(issues))
+            for severity, msg in issues:
+                _flog.error("  [%s] %s", severity, msg)
+        else:
+            _flog.info("Firmware check completed.")
+    except Exception:
+        _flog.exception("Firmware step failed")
+
+
+def _navdata_auto_update_impl(ctx, device: Optional[Path]) -> None:
     import datetime
     import logging as _logging
 
@@ -2674,6 +2748,11 @@ def navdata_auto_update(ctx, device: Optional[Path]):
     for card in cards:
         if not card.mount_point:
             _log.info(f"Skipping {card.device_path}: not mounted")
+            continue
+
+        blocked = _navdata_block_reason(cfg, card.volume_id)
+        if blocked:
+            _log.info(f"Skipping {card.mount_point}: {blocked}")
             continue
 
         # udisks2 sometimes auto-mounts FAT volumes read-only (e.g. dirty bit).
@@ -3368,6 +3447,11 @@ def navdata_update(ctx, device: Optional[Path], aircraft: int, yes: bool):
         mount = raw['mount']
         card_serial = raw['card_serial']
 
+        blocked = _navdata_block_reason(cfg, card_serial)
+        if blocked:
+            click.echo(f"Skipping {mount}: {blocked}", err=True)
+            continue
+
         if not mount.exists():
             click.echo(f"Warning: {mount} does not exist — skipping.", err=True)
             continue
@@ -3775,6 +3859,402 @@ def navdata_update(ctx, device: Optional[Path], aircraft: int, yes: bool):
 
 
 # ============================================================================
+# Firmware Command Group
+# ============================================================================
+
+@cli.group()
+@click.pass_context
+def firmware(ctx):
+    """
+    Avionics firmware (system software) commands.
+
+    Checks Garmin's public download pages for G3X Touch and GTN Xi software,
+    caches the packages and writes them to SD cards. 'navdata auto-update'
+    runs the same check automatically.
+    """
+    pass
+
+
+def _firmware_products(product_key: Optional[str]):
+    from avcardtool.firmware.registry import PRODUCTS
+    if product_key:
+        if product_key not in PRODUCTS:
+            raise click.ClickException(f"Unknown product '{product_key}' (known: {', '.join(PRODUCTS)})")
+        return [PRODUCTS[product_key]]
+    return list(PRODUCTS.values())
+
+
+@firmware.command('check')
+@click.option('--json', 'as_json', is_flag=True, help='Machine-readable output')
+@click.pass_context
+def firmware_check(ctx, as_json: bool):
+    """Show the latest published version per product, what is cached, and the version on inserted cards."""
+    from avcardtool.firmware.cards import read_log_info
+    from avcardtool.firmware.catalog import fetch_release
+    from avcardtool.firmware.packages import list_cached
+    from avcardtool.firmware.registry import FirmwareError
+    from avcardtool.navdata.sdcard import SDCardDetector
+
+    cfg = ctx.obj['config']
+    data_dir = Path(cfg.system.data_dir)
+    from avcardtool.firmware.state import FirmwareState
+    report = {"products": [], "cards": [],
+              "pending": [{"product": k, "version": p.get("version")}
+                          for _s, k, p in FirmwareState(data_dir).pending_items()]}
+
+    for product in _firmware_products(None):
+        entry = {"product": product.key, "name": product.name,
+                 "enabled": cfg.firmware.product_enabled(product.key),
+                 "cached_versions": [p.version for p in list_cached(data_dir, product.key)]}
+        try:
+            rel = fetch_release(product, cfg.firmware.product_page_url(product.key))
+            entry.update(version=rel.version, release_date=rel.release_date,
+                         download_url=rel.download_url, page_url=rel.page_url)
+        except FirmwareError as e:
+            entry["error"] = str(e)
+        report["products"].append(entry)
+
+    try:
+        for card in SDCardDetector().scan_for_cards():
+            if not card.mount_point:
+                continue
+            info = read_log_info(Path(card.mount_point))
+            if info:
+                report["cards"].append({"mount_point": card.mount_point, "product": info.product,
+                                        "software_version": info.software_version})
+    except Exception as e:
+        logger.debug(f"Card scan failed: {e}")
+
+    if as_json:
+        click.echo(json.dumps(report, indent=2))
+        return
+    for e in report["products"]:
+        click.echo(f"{e['name']} ({e['product']}){'' if e['enabled'] else '  [disabled in config]'}")
+        if "error" in e:
+            click.echo(f"  Could not check: {e['error']}")
+        else:
+            click.echo(f"  Latest:  {e['version']}  ({e['release_date'] or 'no date'})")
+            click.echo(f"  Page:    {e['page_url']}")
+            click.echo(f"  Package: {e['download_url']}")
+        click.echo(f"  Cached:  {', '.join(e['cached_versions']) or 'none'}")
+    for p in report["pending"]:
+        click.echo(f"Waiting for confirmation: {p['product']} {p['version']} ('firmware confirm' or 'cancel')")
+    for c in report["cards"]:
+        click.echo(f"Card {c['mount_point']}: {c['product']} last logged software {c['software_version']}")
+
+
+@firmware.command('download')
+@click.option('--product', 'product_key', default=None, help='g3x_touch or gtn_xi (default: both)')
+@click.pass_context
+def firmware_download(ctx, product_key: Optional[str]):
+    """Download the latest package(s) into the cache (no card is written)."""
+    from avcardtool.firmware.catalog import fetch_release
+    from avcardtool.firmware.packages import ensure_package
+    from avcardtool.firmware.registry import FirmwareError
+
+    cfg = ctx.obj['config']
+    failed = False
+    for product in _firmware_products(product_key):
+        try:
+            rel = fetch_release(product, cfg.firmware.product_page_url(product.key))
+            if cfg.system.dry_run:
+                click.echo(f"DRY RUN: would download {product.name} {rel.version} from {rel.download_url}")
+                continue
+            pkg = ensure_package(rel, product, Path(cfg.system.data_dir))
+            click.echo(f"{product.name} {pkg.version}: {len(pkg.files)} files, "
+                       f"{_fmt_size(pkg.total_size)} in {pkg.root}")
+            if pkg.bulletin_path:
+                click.echo(f"  Service bulletin: {pkg.bulletin_path}")
+        except FirmwareError as e:
+            click.echo(f"{product.name}: {e}", err=True)
+            failed = True
+    if failed:
+        sys.exit(1)
+
+
+@firmware.command('install')
+@click.argument('product_key', metavar='PRODUCT', type=click.Choice(['g3x_touch', 'gtn_xi']))
+@click.argument('device', type=click.Path(path_type=Path, readable=False), required=False)
+@click.option('--yes', '-y', is_flag=True, help='Skip the confirmation prompt')
+@click.option('--erase', is_flag=True,
+              help='gtn_xi: allow wiping a card that is not already a GTN loader card (e.g. a database card)')
+@click.pass_context
+def firmware_install(ctx, product_key: str, device: Optional[Path], yes: bool, erase: bool):
+    """
+    Write the cached (or freshly downloaded) package to a card.
+
+    PRODUCT is g3x_touch or gtn_xi. DEVICE is a block device (/dev/sda1) or a
+    mount point; it may be omitted when exactly one card is present.
+
+    g3x_touch copies the Garmin/ folder to the card whatever version the card's
+    log reports. gtn_xi creates or refreshes a GTN loader card: everything on
+    the card is erased, so use a dedicated card, never the database card.
+    """
+    from avcardtool.firmware.auto import MountTracker
+    from avcardtool.firmware.cards import apply_plan, describe_plan, plan_for_card
+    from avcardtool.firmware.catalog import FirmwareNetworkError, fetch_release
+    from avcardtool.firmware.packages import ensure_package, list_cached
+    from avcardtool.firmware.registry import PRODUCTS, FirmwareError
+    from avcardtool.navdata.sdcard import SDCardDetector
+
+    cfg = ctx.obj['config']
+    data_dir = Path(cfg.system.data_dir)
+    product = PRODUCTS[product_key]
+
+    # --- package ---
+    pkg = None
+    try:
+        rel = fetch_release(product, cfg.firmware.product_page_url(product_key))
+        if not cfg.system.dry_run:
+            pkg = ensure_package(rel, product, data_dir)
+    except FirmwareNetworkError as e:
+        click.echo(f"Warning: {e}", err=True)
+    except FirmwareError as e:
+        raise click.ClickException(str(e))
+    if pkg is None:
+        cached = list_cached(data_dir, product_key)
+        if not cached:
+            raise click.ClickException(
+                "Dry run: no package is cached yet. Run 'avcardtool firmware download' first."
+                if cfg.system.dry_run else f"No {product.name} package available.")
+        pkg = cached[0]
+    click.echo(f"{product.name} software {pkg.version} ({len(pkg.files)} files, {_fmt_size(pkg.total_size)})")
+
+    # --- card ---
+    detector = SDCardDetector()
+    mounts = MountTracker(detector, logger)
+    try:
+        dev = None
+        if device is not None and not device.is_dir():
+            dev = device
+            existing = _get_mount(dev)
+            mount = mounts.inspect(dev, str(existing) if existing else None)
+        elif device is not None:
+            mount = device
+        else:
+            cards = detector.scan_for_cards()
+            if len(cards) != 1:
+                names = ", ".join(c.device_path for c in cards) or "none found"
+                raise click.ClickException(f"Name the card to use (cards present: {names}).")
+            dev = Path(cards[0].device_path)
+            mount = mounts.inspect(dev, cards[0].mount_point)
+
+        try:
+            plan = plan_for_card(product, pkg, mount, manual=True, erase_ok=erase,
+                                 remove_after_install=cfg.firmware.remove_after_install,
+                                 cached=list_cached(data_dir, product_key))
+        except FirmwareError as e:
+            raise click.ClickException(str(e))
+
+        if plan.installed_version:
+            click.echo(f"Card reports: {plan.installed_version}")
+        for line in describe_plan(plan):
+            click.echo(line)
+        if not plan.writes:
+            return
+        if cfg.system.dry_run:
+            click.echo("DRY RUN: nothing written.")
+            return
+        from avcardtool.firmware import cycle as fw_cycle
+        from avcardtool.firmware.cards import is_database_card
+        from avcardtool.firmware.state import FirmwareState
+        use_cycle = plan.erase and is_database_card(product, mount)
+        serial = _card_serial(detector, dev, mount) if use_cycle else None
+        if use_cycle and not serial:
+            raise click.ClickException(
+                "This is the avionics' database card but its volume serial cannot be read; refusing to wipe it "
+                "because database updates could not be paused for it.")
+        if not yes:
+            warn = ("\nEVERYTHING ON THE CARD WILL BE DELETED"
+                    + (" (databases included; they are reinstalled after you confirm the software is installed)"
+                       if use_cycle else "") + ". " if plan.erase else "")
+            click.confirm(f"{warn}Write {product.name} {pkg.version} to {mount}?", abort=True)
+
+        write_mount = mounts.writable(dev, mount) if dev else mount
+        plan.card = write_mount
+        try:
+            if use_cycle:
+                state = FirmwareState(data_dir)
+                n = fw_cycle.run_cycle(cfg, product, pkg, write_mount, serial, state,
+                                       _notification_manager(cfg), logger,
+                                       resume=state.pending(serial, product_key) is not None)
+            else:
+                n = apply_plan(plan, pkg)
+        except FirmwareError as e:
+            raise click.ClickException(str(e))
+        click.echo(f"Wrote {n} file(s) to {write_mount} (each verified by size and sha256).")
+        if use_cycle:
+            click.echo("Database updates for this card are paused until you run "
+                       f"'avcardtool firmware confirm {product_key}' (or 'cancel').")
+        click.echo("\nNext:")
+        for step in product.next_steps:
+            click.echo(f"  - {step}")
+        if pkg.bulletin_path:
+            click.echo(f"  - Service bulletin: {pkg.bulletin_path}")
+    finally:
+        mounts.release()
+
+
+def _card_serial(detector, dev: Optional[Path], mount: Optional[Path]) -> Optional[str]:
+    """Volume serial of the card at a block device or mount point (None if unknown)."""
+    for c in detector.scan_for_cards():
+        if (dev is not None and c.device_path == str(dev)) or \
+                (mount is not None and c.mount_point and Path(c.mount_point).resolve() == Path(mount).resolve()):
+            return (c.volume_id or "").strip() or None
+    return None
+
+
+def _cycle_targets(state, product_key: Optional[str], serial: Optional[str]):
+    items = [(s, k, p) for s, k, p in state.pending_items()
+             if (not product_key or k == product_key) and (not serial or s == serial)]
+    if len(items) != 1:
+        raise click.ClickException(
+            "No firmware cycle is waiting for confirmation." if not items else
+            "More than one cycle is waiting; name the product and --card.")
+    return items[0]
+
+
+@firmware.command('set-installed')
+@click.argument('product_key', metavar='PRODUCT', type=click.Choice(['g3x_touch', 'gtn_xi']))
+@click.argument('version')
+@click.argument('device', type=click.Path(path_type=Path, readable=False), required=False)
+@click.option('--card', 'serial', default=None, help='Card volume serial (instead of DEVICE)')
+@click.pass_context
+def firmware_set_installed(ctx, product_key: str, version: str, device: Optional[Path], serial: Optional[str]):
+    """
+    Record the software version the avionics already has (from its System Information page).
+
+    Normally not needed: the first time a database card is seen, the avionics is
+    assumed to run the version Garmin lists at that moment. Use this to correct
+    that record (e.g. the avionics is actually behind).
+    """
+    from avcardtool.firmware.cards import is_database_card
+    from avcardtool.firmware.catalog import parse_version
+    from avcardtool.firmware.registry import PRODUCTS, FirmwareError
+    from avcardtool.firmware.state import FirmwareState
+    from avcardtool.navdata.sdcard import SDCardDetector
+
+    cfg = ctx.obj['config']
+    product = PRODUCTS[product_key]
+    try:
+        parse_version(version)
+    except FirmwareError as e:
+        raise click.ClickException(str(e))
+    if not serial:
+        detector = SDCardDetector()
+        if device is not None:
+            mount = device if device.is_dir() else None
+            serial = _card_serial(detector, None if mount else device, mount)
+        else:
+            found = [c for c in detector.scan_for_cards()
+                     if c.mount_point and (c.volume_id or "").strip()
+                     and is_database_card(product, Path(c.mount_point))]
+            if len(found) == 1:
+                serial = found[0].volume_id.strip()
+            else:
+                raise click.ClickException(
+                    f"Need exactly one inserted {product.name} database card (found {len(found)}); "
+                    "name the DEVICE or use --card.")
+    if not serial:
+        raise click.ClickException("Could not read the card's volume serial.")
+    if cfg.system.dry_run:
+        click.echo(f"DRY RUN: would record {product.name} {version} for that card.")
+        return
+    state = FirmwareState(Path(cfg.system.data_dir))
+    state.set_installed(serial, product_key, version)
+    state.save()
+    click.echo(f"Recorded: the {product.name} for this card has software {version}.")
+
+
+def _cycle_resolve(ctx, product_key: Optional[str], serial: Optional[str], action: str):
+    from avcardtool.firmware.state import FirmwareState
+    cfg = ctx.obj['config']
+    state = FirmwareState(Path(cfg.system.data_dir))
+    s, k, pend = _cycle_targets(state, product_key, serial)
+    if cfg.system.dry_run:
+        click.echo(f"DRY RUN: would {action} {k} {pend.get('version')}.")
+        return
+    version = state.confirm(s, k) if action == "confirm" else state.cancel(s, k)
+    state.save()
+    verb = "recorded as installed" if action == "confirm" else "cancelled"
+    click.echo(f"{k} {version}: {verb}. The card's loader files are removed and its databases are "
+               "reinstalled the next time the card is in the reader (or run 'avcardtool navdata auto-update').")
+
+
+@firmware.command('confirm')
+@click.argument('product_key', metavar='[PRODUCT]', required=False, type=click.Choice(['g3x_touch', 'gtn_xi']))
+@click.option('--card', 'serial', default=None, help='Card volume serial')
+@click.pass_context
+def firmware_confirm(ctx, product_key: Optional[str], serial: Optional[str]):
+    """The firmware written to the database card is installed: restore the databases."""
+    _cycle_resolve(ctx, product_key, serial, "confirm")
+
+
+@firmware.command('cancel')
+@click.argument('product_key', metavar='[PRODUCT]', required=False, type=click.Choice(['g3x_touch', 'gtn_xi']))
+@click.option('--card', 'serial', default=None, help='Card volume serial')
+@click.pass_context
+def firmware_cancel(ctx, product_key: Optional[str], serial: Optional[str]):
+    """Not installing the firmware: restore the databases (this version is not offered again for the card)."""
+    _cycle_resolve(ctx, product_key, serial, "cancel")
+
+
+@firmware.command('status')
+@click.pass_context
+def firmware_status(ctx):
+    """Per tracked card: recorded installed version, pending confirmation, restore still to do."""
+    from avcardtool.firmware.state import FirmwareState
+    state = FirmwareState(Path(ctx.obj['config'].system.data_dir))
+    cards = state.data.get("cards") or {}
+    if not cards:
+        click.echo("No cards tracked yet (a database card is recorded the first time it is seen).")
+    for serial, by_product in cards.items():
+        for key, e in (by_product or {}).items():
+            click.echo(f"Card {serial} / {key}")
+            click.echo(f"  Installed version: {e.get('installed_version') or 'not recorded'}")
+            if e.get("pending"):
+                click.echo(f"  Pending: {e['pending'].get('version')} written {e['pending'].get('written_at')} "
+                           f"(awaiting confirmation; navdata paused)")
+            if e.get("restore"):
+                click.echo("  Restore: loader files to be removed and databases reinstalled at the next run")
+            if e.get("declined"):
+                click.echo(f"  Declined: {', '.join(e['declined'])}")
+
+
+@firmware.command('confirm-server')
+@click.pass_context
+def firmware_confirm_server(ctx):
+    """Serve the one-time confirmation links (firmware.confirm_url / confirm_listen)."""
+    from avcardtool.firmware.confirm_server import run_server
+    run_server(ctx.obj['config'])
+
+
+def _get_mount(device: Path) -> Optional[Path]:
+    from avcardtool.core.utils import get_mount_point
+    return get_mount_point(device)
+
+
+@firmware.command('auto-update')
+@click.argument('device', type=click.Path(path_type=Path, readable=False), required=False)
+@click.pass_context
+def firmware_auto_update(ctx, device: Optional[Path]):
+    """
+    Run the unattended firmware step on its own (also run by 'navdata auto-update').
+
+    Checks Garmin, refreshes the cache, notifies about new versions and updates
+    qualifying cards: a G3X card whose log shows an older version, or an
+    existing GTN loader card. A GTN database card is wiped for firmware only
+    when a version newer than its recorded baseline exists (one-card cycle).
+    """
+    from avcardtool.firmware.auto import run_firmware_auto_update
+    cfg = ctx.obj['config']
+    issues = run_firmware_auto_update(cfg, device, logging.getLogger("avcardtool.firmware"),
+                                      _notification_manager(cfg))
+    if any(sev == "ERROR" for sev, _ in issues):
+        sys.exit(1)
+
+
+# ============================================================================
 # Setup Wizard
 # ============================================================================
 
@@ -3795,7 +4275,7 @@ def setup_wizard(ctx, config_path: Optional[Path]):
     file ready for use.
     """
     from avcardtool.core.config import (
-        Config, SystemConfig, FlightDataConfig, NavdataConfig,
+        Config, SystemConfig, FlightDataConfig, NavdataConfig, FirmwareConfig,
         NotificationsConfig, EngineTimeConfig, AirframeTimeConfig, UploaderConfig
     )
 
@@ -4035,6 +4515,20 @@ def setup_wizard(ctx, config_path: Optional[Path]):
             auto_update_navdata = False
 
     # ------------------------------------------------------------------
+    # Section 4b: Avionics firmware
+    # ------------------------------------------------------------------
+    click.echo("\n── Avionics Firmware ─────────────────────────────────────")
+    click.echo(
+        "\navcardtool can check Garmin's public pages for new G3X Touch and\n"
+        "GTN Xi software, keep the packages cached, and write them to cards\n"
+        "(a G3X display still asks the pilot to confirm). It runs together\n"
+        "with the navigation database check.\n"
+    )
+    auto_update_firmware = click.confirm(
+        "Enable automatic firmware checks and card updates?", default=True
+    )
+
+    # ------------------------------------------------------------------
     # Section 5: Email notifications
     # ------------------------------------------------------------------
     click.echo("\n── Email Notifications ───────────────────────────────────")
@@ -4158,6 +4652,10 @@ def setup_wizard(ctx, config_path: Optional[Path]):
     cfg.navdata.auto_download = auto_update_navdata
     cfg.navdata.garmin = navdata_garmin
 
+    cfg.firmware = FirmwareConfig()
+    cfg.firmware.enabled = auto_update_firmware
+    cfg.firmware.products = {"g3x_touch": {"enabled": True}, "gtn_xi": {"enabled": True}}
+
     cfg.notifications = NotificationsConfig()
     cfg.notifications.enabled = notifications_enabled
     cfg.notifications.backends = notification_backends
@@ -4182,12 +4680,15 @@ def setup_wizard(ctx, config_path: Optional[Path]):
     click.echo("Setup complete!")
     click.echo("=" * 60)
 
-    if auto_process_flights or auto_update_navdata or auto_self_update or notifications_enabled:
+    if (auto_process_flights or auto_update_navdata or auto_update_firmware
+            or auto_self_update or notifications_enabled):
         click.echo("\nEnabled features:")
         if auto_process_flights:
             click.echo("  ✓ Flight log processing")
         if auto_update_navdata:
             click.echo("  ✓ Navigation database auto-update")
+        if auto_update_firmware:
+            click.echo("  ✓ Avionics firmware check and card updates")
         if auto_self_update:
             click.echo("  ✓ Automatic weekly self-update")
         if notifications_enabled:
@@ -4520,6 +5021,31 @@ def _editable_install_path() -> Optional[str]:
     return None
 
 
+def _ensure_7z_extractor() -> None:
+    """Best effort: make sure GTN firmware packages can be unpacked (py7zr or a 7-Zip binary).
+
+    Existing installs gain the firmware feature through self-update, which only
+    upgrades the package itself; py7zr is an optional extra. Never fatal.
+    """
+    import importlib.util
+    import shutil
+    import subprocess
+    if importlib.util.find_spec("py7zr") or any(shutil.which(b) for b in ("7zz", "7z", "7za", "7zr")):
+        return
+    cmd = [sys.executable, '-m', 'pip', 'install', '-q', 'py7zr']
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        if result.returncode != 0 and 'externally-managed' in (result.stdout + result.stderr).lower():
+            result = subprocess.run(cmd + ['--break-system-packages'], capture_output=True, text=True, timeout=600)
+        if result.returncode == 0:
+            click.echo("  Installed py7zr (unpacks GTN firmware packages).")
+        else:
+            click.echo("  Could not install py7zr; GTN firmware needs it or the '7zip' package "
+                       "(sudo apt install 7zip).", err=True)
+    except Exception as e:
+        click.echo(f"  Could not install py7zr ({e}); GTN firmware needs it or the '7zip' package.", err=True)
+
+
 def _update_system_files(ctx: click.Context, version: Optional[str]) -> None:
     """Download and install updated udev rules and systemd service files from GitHub."""
     import getpass
@@ -4527,6 +5053,8 @@ def _update_system_files(ctx: click.Context, version: Optional[str]) -> None:
     import pwd
 
     cfg = ctx.obj.get('config') if ctx.obj else None
+    if not (cfg and cfg.system.dry_run):
+        _ensure_7z_extractor()
 
     # Determine the real (non-root) user when invoked via sudo
     real_username = os.environ.get('SUDO_USER') or getpass.getuser()
@@ -4590,6 +5118,12 @@ def _update_system_files(ctx: click.Context, version: Optional[str]) -> None:
             "substitute": False,
         },
         {
+            "url": f"{base_url}/systemd/avcardtool-confirm.service",
+            "dest": Path("/lib/systemd/system/avcardtool-confirm.service"),
+            "substitute": True,
+            "only_if_confirm_url": True,
+        },
+        {
             "url": f"{base_url}/systemd/avcardtool-self-update.service",
             "dest": Path("/lib/systemd/system/avcardtool-self-update.service"),
             "substitute": True,
@@ -4629,8 +5163,16 @@ def _update_system_files(ctx: click.Context, version: Optional[str]) -> None:
         except Exception as e:
             click.echo(f"  Warning: could not remove {legacy_watch.name}: {e}", err=True)
 
+    confirm_url = (cfg.firmware.confirm_url if cfg and getattr(cfg, "firmware", None) else "")
     any_updated = False
     for entry in system_files:
+        # The confirmation-link server is only installed when firmware.confirm_url is set
+        if entry.get("only_if_confirm_url") and not confirm_url:
+            if entry["dest"].exists():
+                subprocess.run(["systemctl", "disable", "--now", entry["dest"].name], capture_output=True)
+                entry["dest"].unlink()
+                any_updated = True
+            continue
         # Skip sudoers entry if self-update is disabled
         if entry.get("validate") and not (cfg.system.auto_self_update if cfg else True):
             if entry["dest"].exists():
@@ -4711,6 +5253,15 @@ def _update_system_files(ctx: click.Context, version: Optional[str]) -> None:
             click.echo(f"  Disabled {timer} (auto_self_update=false in config).")
     except Exception as e:
         click.echo(f"  Warning: could not update {timer}: {e}", err=True)
+
+    # Enable the firmware confirmation-link server when a public URL is configured
+    if confirm_url:
+        try:
+            subprocess.run(["systemctl", "enable", "--now", "avcardtool-confirm.service"],
+                           check=True, capture_output=True)
+            click.echo("  Enabled avcardtool-confirm.service.")
+        except Exception as e:
+            click.echo(f"  Warning: could not enable avcardtool-confirm.service: {e}", err=True)
 
     # Enable or disable the daily navdata re-check timer based on config
     auto_update_navdata = cfg.system.auto_update_navdata if cfg else False

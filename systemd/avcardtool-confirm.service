@@ -1,0 +1,31 @@
+[Unit]
+Description=AVCardTool Firmware Confirmation Link Server
+Documentation=https://github.com/elvinzhou/g3xuploader
+After=network.target
+
+[Service]
+Type=simple
+# Serves the one-time "firmware installed" links (firmware.confirm_url in the
+# config). Only installed when confirm_url is set. After a confirmation it
+# starts 'avcardtool navdata auto-update' so the card is restored right away.
+ExecStart=/usr/local/bin/avcardtool firmware confirm-server
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+User=AVCARDTOOL_USER
+Group=AVCARDTOOL_USER
+
+# Security hardening (mirrors avcardtool-navdata@.service)
+PrivateTmp=yes
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=AVCARDTOOL_DATA_DIR AVCARDTOOL_CONFIG_DIR /media
+# The navdata run it starts after a confirmation lives in this unit: give it
+# the same limits as the navdata units, and let it outlive a server restart.
+KillMode=process
+CPUQuota=50%
+MemoryMax=512M
+
+[Install]
+WantedBy=multi-user.target
