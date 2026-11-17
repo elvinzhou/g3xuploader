@@ -71,9 +71,14 @@ has been put in a GTN. Test on a spare card with GADM at hand before trusting it
 - Region-id -> filename pairing is an inference (see above); it holds for GTN nav (0x01/0x02) and terrain
   (0x23). Re-check it with a TAW dump when Garmin adds a database.
 - Never touch `Garmin/GarminDevice.xml`; leave other devices' `feat_unlk.dat` slots alone.
-- A card's earlier mistakes are not auto-repaired: cards written by 1.14/1.15 of this tool can hold a stray
-  `basemap.bin` (really the old nav_db2 under the wrong name) and a terrain slot signed with System ID 0.
-  The next install rewrites the slots it owns; the stray file is left for the user to delete.
+- Cards written by 1.14/1.15 of this tool (NAVIGATION slot signed with the TAW header's 0x01F2, terrain
+  slot with System ID 0, `nav_db2` left as `basemap.bin`, stale or missing `.sff`) are repaired by the next
+  update: the card is identified from `.gadm.meta` / its other slots when slot 0 names no known avionics
+  (`_card_type_without_nav_slot`), a slot not signed for this unit's product code and System ID no longer
+  counts as installed (`_feat_unlk_missigned`), and a `basemap.bin` identical to the new `nav_db2.bin` is
+  removed (`_misnamed_copies`). Seen on a real GTN: such a card shows "Database Not Digitally Signed" for
+  terrain and no nav data. A database the display already has (per `Garmin/GarminDevice.xml`) is still
+  skipped at install, so a bad copy of it stays on the card.
 
 ## TODO
 
@@ -86,7 +91,7 @@ has been put in a GTN. Test on a spare card with GADM at hand before trusting it
    avionics before declaring it supported.
 4. Removable paths: GADM's list for GTN nav (`/ldr_sys/avtn_db.bin`, `/air_sport.gpi`, ...) does not
    mention `nav_db2.bin` or the `.sff` files; they are overwritten in place. Confirm GADM does not delete
-   anything else, and consider offering cleanup of the stray `basemap.bin` left by older versions.
+   anything else.
 5. `.gadm.meta` `gadmLastInstalled`: GADM writes the PC's local time ("GMT-0800 (Pacific Standard Time)"); we write UTC ("GMT+0000 (Coordinated Universal Time)"). Cosmetic; use the Pi's timezone if it ever matters.
 6. Decide whether `unlockCodes` (returned for every database, unused) matter for any avionics.
 7. The unlock probe (`scripts/unlock_probe.py`) is the way to look at a new avionics: run it, compare the

@@ -1372,7 +1372,75 @@ _AVDB_TO_FEAT_UNLK: dict = {
 }
 
 
-def _read_feat_unlk_crcs(sd_card: Path) -> dict:
+# avdb names whose slot is checked before trusting .navdata_cycles.json
+_AVDB_SIGNING_FEATURE: dict = {**_AVDB_TO_FEAT_UNLK, "Navigation Data": "NAVIGATION"}
+
+
+def _feat_unlk_slots(sd_card: Path) -> dict:
+    """
+    {slot index: (security_id, truncated system id)} for every non-blank
+    913-byte slot of the card's feat_unlk.dat.
+    """
+    from avcardtool.navdata.garmin.feat_unlk import SEC_ID_OFFSET, SLOT_SIZE, CONTENT1_LEN
+
+    try:
+        data = (sd_card / "feat_unlk.dat").read_bytes()
+    except OSError:
+        return {}
+    slots: dict = {}
+    for i in range(len(data) // SLOT_SIZE):
+        s = data[i * SLOT_SIZE:(i + 1) * SLOT_SIZE]
+        if not any(s):
+            continue
+        security_id = (int.from_bytes(s[2:4], "little") + SEC_ID_OFFSET) & 0xFFFF
+        slots[i] = (security_id, int.from_bytes(s[CONTENT1_LEN + 4:CONTENT1_LEN + 8], "little"))
+    return slots
+
+
+def _feat_unlk_missigned(sd_card: Path, security_id: Optional[int],
+                         system_id: Optional[int]) -> dict:
+    """
+    {Feature.name: reason} for slots that are written but not signed for this
+    card's avionics: another product code, or another unit's System ID (0 from
+    an install that didn't know it). The display rejects such a database, so
+    its slot must not count as "already installed". Checks are skipped for
+    values the caller doesn't know.
+    """
+    from avcardtool.navdata.garmin.feat_unlk import Feature, SLOT_SIZE, truncate_system_id
+
+    by_slot = {f.offset // SLOT_SIZE: f for f in Feature}
+    want_sid = truncate_system_id(system_id) if system_id else None
+    bad: dict = {}
+    for i, (sec, sid) in _feat_unlk_slots(sd_card).items():
+        feature = by_slot.get(i)
+        if feature is None:
+            continue
+        if security_id is not None and sec != security_id:
+            bad[feature.name] = f"signed for product 0x{sec:04X}, not 0x{security_id:04X}"
+        elif want_sid is not None and sid != want_sid:
+            bad[feature.name] = ("signed without a System ID" if sid == 0
+                                 else "signed for another unit's System ID")
+    return bad
+
+
+def _drop_missigned_cycles(installed_cycles: dict, missigned: dict, report) -> dict:
+    """
+    installed_cycles without the databases whose feat_unlk.dat slot is not signed
+    for this unit, so they are planned (and installed) again. `report` gets a
+    line per dropped database.
+    """
+    out = dict(installed_cycles)
+    for name in list(out):
+        reason = missigned.get(_AVDB_SIGNING_FEATURE.get(name, ""))
+        if reason:
+            report(f"  {name}: card says {out[name].get('issue')} but its feat_unlk.dat "
+                   f"slot is {reason} — reinstalling")
+            del out[name]
+    return out
+
+
+def _read_feat_unlk_crcs(sd_card: Path, security_id: Optional[int] = None,
+                         system_id: Optional[int] = None) -> dict:
     """
     Return the database file CRC stored in each feat_unlk.dat slot.
 
@@ -1381,7 +1449,8 @@ def _read_feat_unlk_crcs(sd_card: Path) -> dict:
     already has that exact version and the install can be skipped.
 
     Returns {Feature.name: crc_int} — zero-valued (blank/uninitialised) CRCs
-    are excluded.
+    are excluded, and so are slots not signed for the given product code /
+    System ID (see _feat_unlk_missigned), when those are given.
     """
     from avcardtool.navdata.garmin.feat_unlk import Feature
 
@@ -1389,6 +1458,8 @@ def _read_feat_unlk_crcs(sd_card: Path) -> dict:
     if not path.exists():
         return {}
 
+    missigned = (_feat_unlk_missigned(sd_card, security_id, system_id)
+                 if security_id is not None or system_id else {})
     crcs: dict = {}
     try:
         with open(path, "rb") as f:
@@ -1407,7 +1478,7 @@ def _read_feat_unlk_crcs(sd_card: Path) -> dict:
                 raw = f.read(4)
                 if len(raw) == 4:
                     crc = int.from_bytes(raw, "little")
-                    if crc:
+                    if crc and feature.name not in missigned:
                         crcs[feature.name] = crc
     except OSError:
         pass
@@ -1986,6 +2057,61 @@ def _filter_entries_for_avionics(entries: list, target_db_type: int) -> tuple:
     return keep, skip
 
 
+def _misnamed_copies(sd_card: Path, region_paths: dict) -> list:
+    """
+    Files left by an install that didn't know where the unlock response puts a
+    TAW region: for each region now installed at region_paths[id], the file at
+    that region's default name, if it is the very same file (same size and
+    embedded CRC). E.g. a GTN's nav_db2.bin that an older version of this tool
+    wrote as basemap.bin. Other files at the default name are left alone.
+    """
+    from avcardtool.navdata.garmin.taw_parser import TAW_REGION_PATHS
+
+    def _tail(p: Path) -> bytes:
+        with open(p, "rb") as f:
+            f.seek(-4, 2)
+            return f.read(4)
+
+    out = []
+    for region_id, rel in region_paths.items():
+        default = TAW_REGION_PATHS.get(region_id)
+        if not default or default == rel:
+            continue
+        old, new = sd_card / default, sd_card / rel
+        try:
+            if (old.is_file() and new.is_file() and old.stat().st_size == new.stat().st_size >= 4
+                    and _tail(old) == _tail(new)):
+                out.append(old)
+        except OSError:
+            pass
+    return out
+
+
+def _card_type_without_nav_slot(sd_card: Path, manifest: dict, known_types: set) -> Optional[int]:
+    """
+    The card's avionics type when feat_unlk.dat's NAVIGATION slot doesn't name one
+    of the aircraft's avionics: the avionics name in .gadm.meta (written by GADM
+    and by this tool), else the one known type the other slots are signed with.
+    """
+    try:
+        name = json.loads((sd_card / ".gadm.meta").read_text(encoding="utf-8")).get("gadmAvionicsName")
+    except (OSError, ValueError, AttributeError):
+        name = None
+    if isinstance(name, str):
+        for map_name, product_id in (manifest.get("device_type_map") or {}).items():
+            if map_name.lower() == name.strip().lower():
+                click.echo(f".gadm.meta: '{name}' → db_type=0x{product_id:04X} "
+                           f"(feat_unlk.dat NAVIGATION slot names no known avionics)")
+                return product_id
+    others = {sec for sec, _sid in _feat_unlk_slots(sd_card).values()} & known_types
+    if len(others) == 1:
+        db_type = others.pop()
+        click.echo(f"feat_unlk.dat: other slots are signed for db_type=0x{db_type:04X} "
+                   f"(NAVIGATION slot names no known avionics)")
+        return db_type
+    return None
+
+
 def _resolve_target_db_type(sd_card: Path, manifest: dict) -> Optional[int]:
     """
     Determine which avionics database_type (= TAW database_type = feat_unlk security_id)
@@ -2024,6 +2150,7 @@ def _resolve_target_db_type(sd_card: Path, manifest: dict) -> Optional[int]:
 
     # --- 2. Existing feat_unlk.dat ---
     feat_unlk_path = sd_card / "feat_unlk.dat"
+    known_types = set((manifest.get("device_type_map") or {}).values())
     if feat_unlk_path.exists():
         try:
             nav_offset = Feature.NAVIGATION.offset
@@ -2033,6 +2160,14 @@ def _resolve_target_db_type(sd_card: Path, manifest: dict) -> Optional[int]:
             if len(raw) == 2:
                 stored = int.from_bytes(raw, "little")
                 security_id = (stored + SEC_ID_OFFSET) & 0xFFFF
+                if known_types and security_id not in known_types:
+                    # The NAVIGATION slot names no avionics of this aircraft: blank,
+                    # or signed by an older version of this tool with a TAW header's
+                    # family code (a GTN's 'jg600a-*' nav data says G600). Use what
+                    # else the card says about itself.
+                    recovered = _card_type_without_nav_slot(sd_card, manifest, known_types)
+                    if recovered is not None:
+                        return recovered
                 click.echo(
                     f"feat_unlk.dat: NAVIGATION slot security_id=0x{security_id:04X} "
                     f"→ using as target db_type"
@@ -2295,6 +2430,12 @@ def navdata_install(ctx, sd_card: Optional[Path], from_dir: Optional[Path], yes:
                     click.echo(f"    → {f.relative_to(sd_card)}")
                     installed_files.append(f)
                     _extracted_security_ids[str(f)] = security_id
+                for stray in _misnamed_copies(sd_card, region_paths):
+                    from avcardtool.navdata.garmin.taw_parser import _clear_readonly
+                    _clear_readonly(stray)
+                    stray.unlink()
+                    click.echo(f"    Removed {stray.relative_to(sd_card)} (the same file, left "
+                               f"under the wrong name by an older version of this tool)")
             except TAWParseError as e:
                 click.echo(f"  Error extracting {local_path.name}: {e}", err=True)
                 errors.append(str(e))
@@ -2740,6 +2881,10 @@ def navdata_auto_update(ctx, device: Optional[Path]):
                 _log.info(f"  Installed: {installed_cycles}")
             except Exception as e:
                 _log.warning(f"  Could not read .navdata_cycles.json: {e}")
+        installed_cycles = _drop_missigned_cycles(
+            installed_cycles,
+            _feat_unlk_missigned(mount, target_db_type, target_dev.system_id_raw),
+            _log.warning)
 
         # --- Select which issues to download ---
         # current: latest installable, if different from what is on the card.
@@ -2804,7 +2949,7 @@ def navdata_auto_update(ctx, device: Optional[Path]):
         # Read what the card already has (from feat_unlk.dat CRCs).
         # These are compared against the CRCs stored per-issue in the
         # download state to skip installs when the card is already current.
-        feat_unlk_crcs = _read_feat_unlk_crcs(mount)
+        feat_unlk_crcs = _read_feat_unlk_crcs(mount, target_db_type, target_dev.system_id_raw)
         if feat_unlk_crcs:
             _log.info(f"  feat_unlk.dat CRCs: { {k: hex(v) for k, v in feat_unlk_crcs.items()} }")
 
@@ -3149,7 +3294,7 @@ def _report_navdata_dry_run(
     """
     from avcardtool.notifications.events import build_navdata_updated_event
 
-    feat_unlk_crcs = _read_feat_unlk_crcs(mount)
+    feat_unlk_crcs = _read_feat_unlk_crcs(mount, target_db_type)
     dl_state = _read_dl_state(cache_dir) if cache_dir.exists() else {}
 
     would_install = []
@@ -3425,6 +3570,10 @@ def navdata_update(ctx, device: Optional[Path], aircraft: int, yes: bool):
                 installed_cycles = json.loads(cycles_file.read_text()).get("cycles", {})
             except Exception:
                 pass
+        installed_cycles = _drop_missigned_cycles(
+            installed_cycles,
+            _feat_unlk_missigned(mount, target_db_type, target_dev.system_id_raw),
+            lambda m: click.echo(m, err=True))
 
         # Build plan
         plan = []
@@ -3576,7 +3725,7 @@ def navdata_update(ctx, device: Optional[Path], aircraft: int, yes: bool):
         card_dir = data_dir / "navdata" / f"update_{card_serial.replace('-', '')}"
         card_dir.mkdir(parents=True, exist_ok=True)
 
-        feat_unlk_crcs = _read_feat_unlk_crcs(mount)
+        feat_unlk_crcs = _read_feat_unlk_crcs(mount, target_db_type, target_dev.system_id_raw)
 
         manifest_entries = []
         crc_confirmed: dict = {}  # avdb.name -> issue.name for CRC-matched items
