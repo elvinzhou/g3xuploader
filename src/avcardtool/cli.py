@@ -4886,6 +4886,81 @@ def config_show(ctx, section: str):
     click.echo(json.dumps(output, indent=2))
 
 
+def _default_new_config_path() -> Path:
+    """Where a new config goes: /etc when root, else the user's ~/.config."""
+    if os.geteuid() == 0:
+        return Path("/etc/avcardtool/config.json")
+    return Path.home() / ".config" / "avcardtool" / "config.json"
+
+
+@config.command('path')
+@click.pass_context
+def config_path_cmd(ctx):
+    """Print the path of the config file in use."""
+    path = ctx.obj['config'].config_path
+    if path and path.exists():
+        click.echo(str(path))
+    else:
+        click.echo("No config file found (using defaults). "
+                   "Run 'avcardtool config edit' to create one at "
+                   f"{_default_new_config_path()}.", err=True)
+        sys.exit(1)
+
+
+@config.command('edit')
+@click.option('--editor', default=None,
+              help='Editor to use (default: $VISUAL, $EDITOR, then nano/vim/vi).')
+@click.pass_context
+def config_edit(ctx, editor: Optional[str]):
+    """
+    Open the config file in a text editor.
+
+    Edits the file avcardtool actually loads (or the one given with --config).
+    If none exists yet, a default config is created first. The result is
+    checked after you save; if it is invalid you can re-open it to fix it.
+    """
+    cfg = ctx.obj['config']
+    path = cfg.config_path
+    if path is None or not path.exists():
+        path = path or _default_new_config_path()
+        if not click.confirm(f"No config file found. Create a default one at {path}?",
+                             default=True):
+            sys.exit(0)
+        try:
+            Config.generate_default(path)
+        except OSError as e:
+            click.echo(f"Error: could not create {path}: {e}", err=True)
+            sys.exit(1)
+
+    if not os.access(path, os.W_OK):
+        click.echo(f"Error: {path} is not writable by this user. "
+                   f"Try: sudo avcardtool config edit", err=True)
+        sys.exit(1)
+
+    click.echo(f"Editing {path}")
+    while True:
+        try:
+            click.edit(filename=str(path), editor=editor)
+        except click.ClickException as e:
+            click.echo(f"Error: {e.format_message()}", err=True)
+            click.echo("Set $EDITOR (e.g. EDITOR=nano) or pass --editor.", err=True)
+            sys.exit(1)
+
+        try:
+            with open(path) as f:
+                json.load(f)
+            Config(config_path=path).validate()
+            click.echo("✓ Configuration is valid")
+            return
+        except (ValueError, TypeError, OSError) as e:
+            # Bad JSON / validate() failures are ValueErrors; unknown keys in a
+            # section raise TypeError from the dataclass constructor.
+            click.echo(f"✗ Configuration error: {e}", err=True)
+            if not click.confirm("Re-open the editor to fix it?", default=True):
+                click.echo(f"Left {path} as saved; it will not load until fixed.", err=True)
+                sys.exit(1)
+
+
 @config.command('generate')
 @click.argument(
     'output_file',

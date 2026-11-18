@@ -401,6 +401,8 @@ avcardtool firmware cancel [PRODUCT]      # Not installing: restore the card (--
 avcardtool firmware confirm-server        # Serve the one-time confirmation links
 
 # Configuration
+avcardtool config edit                    # Open the config file in $EDITOR (creates one if missing)
+avcardtool config path                    # Print which config file is in use
 avcardtool config show                    # Print current configuration
 avcardtool config validate                # Validate configuration file
 
